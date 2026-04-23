@@ -20,6 +20,18 @@ function pickProvider(): Provider {
   throw new Error("No API key found. Set OPENAI_API_KEY or ANTHROPIC_API_KEY.");
 }
 
+// Fail fast BEFORE rendering the TUI — otherwise ink takes over the terminal
+// and error messages get swallowed / Enter does nothing.
+let initialProvider: Provider;
+try {
+  initialProvider = pickProvider();
+} catch (e: any) {
+  process.stderr.write(`\nrawdog: ${e.message}\n`);
+  process.stderr.write(`\nSet it in your shell:\n  export OPENAI_API_KEY=sk-...\n`);
+  process.stderr.write(`Or create a .env file in this directory (bun auto-loads it).\n\n`);
+  process.exit(1);
+}
+
 type LogEntry =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
@@ -36,14 +48,9 @@ function App() {
   const providerRef = useRef<Provider | null>(null);
 
   useEffect(() => {
-    try {
-      const provider = pickProvider();
-      providerRef.current = provider;
-      agentRef.current = createAgent(provider, SYSTEM);
-      setLog([{ kind: "system", text: `rawdog ready · ${provider.name}:${provider.model}` }]);
-    } catch (e: any) {
-      setLog([{ kind: "system", text: `error: ${e.message}` }]);
-    }
+    providerRef.current = initialProvider;
+    agentRef.current = createAgent(initialProvider, SYSTEM);
+    setLog([{ kind: "system", text: `rawdog ready · ${initialProvider.name}:${initialProvider.model}` }]);
   }, []);
 
   useInput((_input, key) => {

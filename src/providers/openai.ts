@@ -6,7 +6,7 @@ export class OpenAIProvider implements Provider {
   model: string;
   private client: OpenAI;
 
-  constructor(model = process.env.OPENAI_MODEL || "gpt-4o") {
+  constructor(model = process.env.OPENAI_MODEL || "gpt-5") {
     this.model = model;
     this.client = new OpenAI();
   }

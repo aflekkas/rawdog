@@ -32,8 +32,7 @@ export class AnthropicProvider implements Provider {
         role: m.role === "tool" ? "user" : m.role,
         content: m.content as any,
       })),
-      // Adaptive thinking requires SDK >= 0.50. Upgrade @anthropic-ai/sdk and uncomment:
-      // thinking: { type: "adaptive" },
+      thinking: { type: "adaptive" },
     });
 
     for await (const event of stream) {
