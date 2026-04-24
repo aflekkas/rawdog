@@ -2,14 +2,36 @@
 
 minimal TUI agentic harness. Bun + Ink + OpenAI/Anthropic.
 
+## Docs
+
+Full manual lives under [`docs/`](docs/). Start at [`docs/index.md`](docs/index.md). Rawdog ships with a `docs` tool and a `/docs` slash command so the agent can read its own manual without leaving the TUI — the `docs` tool is the source of truth when you ask "what can rawdog do?".
+
+**Contributor rule:** any behavioral change updates the relevant file under `docs/` in the same commit. See [`docs/docs-system.md`](docs/docs-system.md) and `AGENTS.md`.
+
 ## Setup
 
 ```bash
-cd ~/Documents/rawdog
 bun install
-cp .env.example .env
-# edit .env, set OPENAI_API_KEY
 bun link        # makes `rawdog` available globally
+rawdog          # first run drops into an interactive setup — pick provider, paste key
+```
+
+The key is saved to `~/.config/rawdog/.env` (chmod 600) and reused on every run. No per-project `.env` needed.
+
+To rotate or add a second provider:
+
+```bash
+rawdog login            # provider picker
+rawdog login openai
+rawdog login anthropic
+```
+
+Inside the TUI, `/login` prints current key status and the storage path.
+
+### Single binary (optional)
+
+```bash
+bun run build   # produces bin/rawdog — a compiled binary, no Bun install needed on target
 ```
 
 ## Run
@@ -26,7 +48,7 @@ Or from the project dir without linking:
 bun start
 ```
 
-Switch providers with `RAWDOG_PROVIDER=anthropic` (requires `ANTHROPIC_API_KEY`).
+Switch providers with `RAWDOG_PROVIDER=anthropic`, `-m anthropic:<model>`, or `/model` inside the TUI.
 
 ### CLI
 
@@ -58,13 +80,13 @@ Already-exported shell env vars always win.
 
 - `/help` — list commands (includes any custom ones)
 - `/cost` — token usage + estimated spend
-- `/context` — show loaded AGENTS.md / `.rawdog/*` / config / MCP / custom commands
+- `/context` — show loaded AGENTS.md / CLAUDE.md / config / MCP / custom commands
 - `/sessions` — list recent session transcripts
 - `/model <spec>` — switch provider/model mid-session, preserves history
 - `/resume [id]` — list sessions or hydrate one into the current session
 - `/todo` — show persistent todo list (stored at `.rawdog/todo.json`)
 - `/compact` — ask for a history summary to free context
-- `/init` — create `.rawdog/AGENTS.md` in the cwd
+- `/init` — create `AGENTS.md` in the cwd
 - `/clear` / `/new` — wipe the chat log (in-memory only)
 - `/paste` / `/attach <path>` / `/drop` — image attachments
 - `/restart` — restart in place
@@ -80,20 +102,16 @@ Already-exported shell env vars always win.
 
 ## Project context
 
-rawdog walks up from cwd to root and loads any of these it finds into every turn's system prompt:
+rawdog walks up from cwd to root and loads any `AGENTS.md` or `CLAUDE.md` it finds into every turn's system prompt (nearest first).
 
-- `AGENTS.md`, `CLAUDE.md` (either at a given level)
-- `.rawdog/AGENTS.md`, `.rawdog/CLAUDE.md`, `.rawdog/context.md`
-
-Run `/init` to scaffold a `.rawdog/AGENTS.md` in the current directory.
+Run `/init` to scaffold an `AGENTS.md` in the current directory.
 
 ## `.rawdog/` directory
 
-Everything project-scoped lives here. Walk-up lookup from cwd, so nested dirs inherit.
+Everything else project-scoped lives here. Walk-up lookup from cwd, so nested dirs inherit.
 
 ```
 .rawdog/
-├── AGENTS.md          # project context, auto-loaded into system prompt
 ├── config.json        # per-project defaults (provider, model, disabled tools)
 ├── mcp.json           # MCP servers to spawn
 ├── commands/*.md      # custom slash commands
@@ -152,6 +170,34 @@ Focus on: security, error handling, unnecessary abstractions.
 ```
 
 Invoke: `/review extra attention to auth changes`.
+
+### Skills
+
+Skills are slash commands with YAML frontmatter and invisible prompt injection (the Claude Code skill pattern). Drop `.rawdog/skills/<name>/SKILL.md` (project) or `~/.rawdog/skills/<name>/SKILL.md` (user-global). Project wins on name collision. Skills take precedence over custom commands.
+
+```
+---
+name: review
+description: review the staged diff for bugs, security, and abstractions
+invisible: true
+---
+
+Run git diff --staged and flag anything risky. Focus: $ARGS
+```
+
+Frontmatter keys:
+- `name` — override dirname as the slash name (optional)
+- `description` — shown in `/help` and injected into the system prompt so the model knows the skill exists
+- `invisible` — default `true`. When true, the expanded body goes to the model but the log shows just `/<name>` (like a Claude Code skill). Set `false` to mirror the legacy custom-command behavior where the expanded body is visible.
+
+`$ARGS` substitution works the same as custom commands. The builtin `/init` uses this same split-payload pattern hardcoded.
+
+Meta-commands for managing skills:
+
+- `/skills` — list (reloads from disk)
+- `/skills show <name>` — print SKILL.md
+- `/skills rm <name>` — delete the skill dir (project-scoped only; user-global must be removed manually)
+- `/skills new <name>` — launches an interactive builder that asks for description, args, body, visibility, then writes `SKILL.md` for you
 
 ### Sessions
 

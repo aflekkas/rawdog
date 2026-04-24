@@ -217,7 +217,7 @@ export function createAgent(
           RAWDOG_TOOL_INPUT: toolInputJson.slice(0, 4000),
           RAWDOG_TOOL_OUTPUT: output.slice(0, 2000),
         });
-        results.push({ type: "tool_result", tool_use_id: call.id, content: output });
+        results.push({ type: "tool_result", tool_use_id: call.id, content: output, tool_name: call.name });
       }
       state.messages.push({ role: "user", content: results });
     }

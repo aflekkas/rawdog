@@ -92,8 +92,32 @@ export function TextInput({ value, onChange, onSubmit, placeholder, focus = true
         return;
       }
 
-      // Ignore other control chars and arrow-ups/downs
-      if (key.upArrow || key.downArrow || key.tab || key.escape) return;
+      if (key.upArrow) {
+        const before = value.slice(0, cursor);
+        const curLineStart = before.lastIndexOf("\n") + 1;
+        if (curLineStart === 0) return; // already on first line — let parent handle
+        const col = cursor - curLineStart;
+        const prevLineEnd = curLineStart - 1;
+        const prevLineStart = before.lastIndexOf("\n", prevLineEnd - 1) + 1;
+        const prevLineLen = prevLineEnd - prevLineStart;
+        setCursor(prevLineStart + Math.min(col, prevLineLen));
+        return;
+      }
+      if (key.downArrow) {
+        const curLineStart = value.slice(0, cursor).lastIndexOf("\n") + 1;
+        const col = cursor - curLineStart;
+        const nextNl = value.indexOf("\n", cursor);
+        if (nextNl === -1) return; // last line
+        const nextLineStart = nextNl + 1;
+        const nextNlAfter = value.indexOf("\n", nextLineStart);
+        const nextLineEnd = nextNlAfter === -1 ? value.length : nextNlAfter;
+        const nextLineLen = nextLineEnd - nextLineStart;
+        setCursor(nextLineStart + Math.min(col, nextLineLen));
+        return;
+      }
+
+      // Ignore other control chars
+      if (key.tab || key.escape) return;
       if (key.ctrl || key.meta) return;
 
       // --- insertion ---
@@ -119,10 +143,11 @@ export function TextInput({ value, onChange, onSubmit, placeholder, focus = true
   const at = value[cursor] ?? " ";
   const after = value.slice(cursor + 1);
   return (
-    <Box>
-      <Text>{before}</Text>
-      <Text inverse>{at}</Text>
-      <Text>{after}</Text>
-    </Box>
+    <Text>
+      {before}
+      <Text inverse>{at === "\n" ? " " : at}</Text>
+      {at === "\n" ? "\n" : null}
+      {after}
+    </Text>
   );
 }

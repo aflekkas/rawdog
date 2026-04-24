@@ -17,3 +17,29 @@ Recent commits use short, imperative summaries in lowercase, for example `fail f
 
 ## Configuration Notes
 Keep secrets in `.env`, not in source. Document new variables in `.env.example` and update `README.md` whenever setup, providers, or available tools change.
+
+## TUI Scalability (hard rule)
+Terminal panes can be any width, and lines committed to ink's `<Static>` end up in scrollback — which terminals can't reflow. Anything added to the UI must hold up at ~40 cols, render cleanly at ~200 cols, and survive a live resize.
+
+- No `width={columns}` / `width={process.stdout.columns}` on boxes. Let ink auto-size to content, or use flex (`flexGrow`).
+- Prefer ink's native `borderStyle` / `paddingX` / `justifyContent` over hand-drawn border chars (`╭─╮│╰╯`). Manual borders bake a fixed width into scrollback and break on resize.
+- When a hard-coded width string is unavoidable (e.g. a divider in the live region), recompute it each render from `process.stdout.columns` so resize reflows it. Never put such a string inside `<Static>`.
+- Cap long prose (welcome banners, help blurbs) at a readable character count (~72) instead of stretching to the terminal. Stretched text looks fine at startup and catastrophic after a resize.
+- Before shipping a UI change, mentally run it at three widths: narrow tmux split (~40), default (~100), huge monitor (~200). If it only looks good at one, redesign.
+
+## Documentation (hard rule)
+Rawdog ships its own manual under `docs/`. It is load-bearing — both for humans and for rawdog itself at runtime via the `docs` tool and `/docs` slash command. Docs and code land together.
+
+**Any behavioral change MUST update the relevant file under `docs/` in the same commit.** Non-exhaustive list:
+
+- Tool added/removed/renamed/modified → `docs/tools.md`
+- Slash command change → `docs/slash-commands.md`
+- CLI flag, model spec, resolution order → `docs/cli.md`, `docs/providers.md`
+- New `.rawdog/` file or config key → `docs/config.md` plus the relevant feature doc
+- Hook event or lifecycle change → `docs/hooks.md`
+- MCP capability change → `docs/mcp.md`
+- Provider wiring or pricing → `docs/providers.md`
+- TUI keybinding or input feature → `docs/tui.md`
+- New doc file → also add a line to `docs/index.md`
+
+If a change ships without updating docs, the change is incomplete. No "follow-up PR." See `docs/docs-system.md` for the full rule and how the docs are surfaced at runtime.

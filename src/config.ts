@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { findProjectRoot } from "./sessions.ts";
+import { userConfigJsonPath } from "./setup.ts";
 
 export type RawdogConfig = {
   defaultProvider?: "openai" | "anthropic";
@@ -16,12 +17,15 @@ export function configPath(cwd: string): string {
   return join(findProjectRoot(cwd), ".rawdog", "config.json");
 }
 
+export function userConfigPath(): string {
+  return userConfigJsonPath();
+}
+
 function isStr(v: unknown): v is string {
   return typeof v === "string";
 }
 
-export function loadConfig(cwd: string): RawdogConfig {
-  const path = configPath(cwd);
+function parseConfigFile(path: string): RawdogConfig {
   if (!existsSync(path)) return {};
   let raw: unknown;
   try {
@@ -52,4 +56,31 @@ export function loadConfig(cwd: string): RawdogConfig {
   }
 
   return out;
+}
+
+// Merge user-global under project-local. Project values win on conflict.
+// `tools.disabled` is unioned so user-level disables cannot be silently
+// undone by a project config that omits the field.
+function merge(base: RawdogConfig, over: RawdogConfig): RawdogConfig {
+  const out: RawdogConfig = { ...base };
+  if (over.defaultProvider !== undefined) out.defaultProvider = over.defaultProvider;
+  if (over.defaultModel !== undefined) out.defaultModel = over.defaultModel;
+  if (over.openaiModel !== undefined) out.openaiModel = over.openaiModel;
+  if (over.anthropicModel !== undefined) out.anthropicModel = over.anthropicModel;
+
+  const unionDisabled = Array.from(
+    new Set([
+      ...(base.tools?.disabled ?? []),
+      ...(over.tools?.disabled ?? []),
+    ]),
+  );
+  if (unionDisabled.length) out.tools = { disabled: unionDisabled };
+
+  return out;
+}
+
+export function loadConfig(cwd: string): RawdogConfig {
+  const user = parseConfigFile(userConfigPath());
+  const project = parseConfigFile(configPath(cwd));
+  return merge(user, project);
 }

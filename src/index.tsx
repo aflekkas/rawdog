@@ -3,12 +3,13 @@ import React, { useState, useEffect, useRef } from "react";
 import { render, Box, Static, Text, useApp, useInput } from "ink";
 import { spawnSync } from "node:child_process";
 import { TextInput } from "./text-input.tsx";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgent } from "./agent.ts";
 import type { TurnUsage } from "./agent.ts";
+import { toolDefs as baseToolDefs } from "./tools.ts";
 import type { ContentBlock, Provider } from "./providers/types.ts";
 import { pickProvider, parseProviderSpec, estimateContextWindow, type PickOptions } from "./providers.ts";
 import { GradientText, wrapText } from "./ui.tsx";
@@ -26,7 +27,19 @@ import {
   readImageFile,
 } from "./clipboard.ts";
 import { loadConfig, configPath } from "./config.ts";
+import { SetupScreen } from "./setup-ui.tsx";
+import { userEnvPath } from "./setup.ts";
 import { loadCommands, expandCommand, type CustomCommand } from "./commands.ts";
+import {
+  loadSkills,
+  expandSkill,
+  skillsSystemBlock,
+  isValidSkillName,
+  skillsDir,
+  skillPath,
+  type Skill,
+} from "./skills.ts";
+import { loadAgents, loadAgent, agentsDir, isValidAgentName, type SubAgent } from "./agents.ts";
 import { startMcp, type McpSession } from "./mcp.ts";
 import { highlight } from "./highlight.ts";
 
@@ -75,6 +88,9 @@ Tools: bash, read, write, edit, grep, glob, spawn_agent, memory, sessions.
 - Use \`spawn_agent\` for heavy exploration so intermediate tool output doesn't pollute context.
 - Use \`memory\` to persist notes across sessions (~/.rawdog/memory.md — user-global).
 - Use \`sessions\` (list/read/search) to recall prior conversations with the user in this project. Transcripts live in \`<project>/.rawdog/sessions/\` and are appended to automatically — you already have full history across restarts, just query it when the user refers to past work.
+- Use \`docs\` (list/read) to read rawdog's own bundled documentation before answering questions about what rawdog can do, or when you need primary-source detail on a tool, slash command, config key, hook, MCP, session, provider, or CLI flag. Docs live at \`<install-dir>/docs/*.md\` and are the source of truth for rawdog itself. Do not guess — \`docs\` the answer.
+
+Doc maintenance is a hard rule, not a suggestion. When you add, remove, or change rawdog's behavior — new tool, new slash command, new CLI flag, new \`.rawdog/\` file, new hook event, provider wiring, pricing, TUI keybinding, MCP capability — you update the relevant file under \`docs/\` in the SAME change. No "I'll do it later." No "it's obvious." Code and docs land together. If you are about to finish a behavioral change without touching docs, stop and go update them. This applies equally when the user asked you to do the work and when you decided to do it yourself.
 
 You render in a terminal TUI. Keep your text tight. No preamble, no filler, no "I'd be happy to help", no trailing summary of what you just did — the user can read the diff. Before a tool call, one short sentence on what you're about to do; after, state the result directly. One-word answers are fine when the question is simple.
 
@@ -129,8 +145,8 @@ But you are also FAIR. Not a chud, not a reactionary, not contrarian for sport. 
 
 CRITICAL: the persona is for chat ONLY. It does NOT bleed into actual work. Code you write, commit messages, PR descriptions, doc comments, variable names, log output, and any file you create or edit — all of that stays clean, professional, and conventional. The user's repo is the user's repo; do not swear in it, do not leave jokes in it, do not slop attitude into commits or commit co-authored trailers. You are aware of this split and hold it firmly: mouth off in chat, write boring-ass competent code.`;
 
-// Walk from cwd up toward / collecting AGENTS.md, CLAUDE.md, and
-// .rawdog/{AGENTS,CLAUDE,context}.md — nearest first. Cap the walk.
+// Walk from cwd up toward / collecting AGENTS.md and CLAUDE.md — nearest
+// first. Cap the walk.
 function loadProjectContext(cwd: string): { path: string; body: string }[] {
   const out: { path: string; body: string }[] = [];
   const seen = new Set<string>();
@@ -139,9 +155,6 @@ function loadProjectContext(cwd: string): { path: string; body: string }[] {
     const candidates = [
       join(dir, "AGENTS.md"),
       join(dir, "CLAUDE.md"),
-      join(dir, ".rawdog", "AGENTS.md"),
-      join(dir, ".rawdog", "CLAUDE.md"),
-      join(dir, ".rawdog", "context.md"),
     ];
     for (const p of candidates) {
       if (seen.has(p)) continue;
@@ -159,17 +172,22 @@ function loadProjectContext(cwd: string): { path: string; body: string }[] {
   return out;
 }
 
-function buildSystem(cwd: string): { system: string; loaded: string[] } {
+function buildSystem(
+  cwd: string,
+  skills: Skill[] = [],
+): { system: string; loaded: string[] } {
   const ctx = loadProjectContext(cwd);
-  if (ctx.length === 0) return { system: BASE_SYSTEM, loaded: [] };
-  const block = ctx
-    .map((c) => `<context src="${c.path}">\n${c.body}\n</context>`)
-    .join("\n\n");
+  const parts: string[] = [BASE_SYSTEM];
+  if (ctx.length > 0) {
+    const block = ctx
+      .map((c) => `<context src="${c.path}">\n${c.body}\n</context>`)
+      .join("\n\n");
+    parts.push("Project context (loaded from filesystem):\n\n" + block);
+  }
+  const skillBlock = skillsSystemBlock(skills);
+  if (skillBlock) parts.push(skillBlock);
   return {
-    system:
-      BASE_SYSTEM +
-      "\n\nProject context (loaded from filesystem):\n\n" +
-      block,
+    system: parts.join("\n\n"),
     loaded: ctx.map((c) => c.path),
   };
 }
@@ -242,9 +260,18 @@ function parseArgv(argv: string[]): CliArgs {
   return out;
 }
 
-const HELP_TEXT = `\nrawdog — minimal TUI agentic harness\n\nusage:\n  rawdog [options] [prompt...]\n  echo "prompt" | rawdog -p\n\noptions:\n  -p, --print            headless mode (read stdin or prompt, stream response, exit)\n  -m, --model <spec>     model spec, e.g. "gpt-5" or "anthropic:claude-opus-4-7"\n  --resume [id]          resume prior session (most recent if id omitted)\n  -h, --help             this message\n\nenv: OPENAI_API_KEY / ANTHROPIC_API_KEY / RAWDOG_PROVIDER\n\nslash commands in TUI:\n  /help /cost /context /sessions /compact /init /clear /new\n  /paste /attach /drop /restart /model /resume /todo /exit /quit\n`;
+const HELP_TEXT = `\nrawdog — minimal TUI agentic harness\n\nusage:\n  rawdog [options] [prompt...]\n  rawdog login [openai|anthropic]       store API key in ~/.config/rawdog/.env\n  echo "prompt" | rawdog -p\n\noptions:\n  -p, --print            headless mode (read stdin or prompt, stream response, exit)\n  -m, --model <spec>     model spec, e.g. "gpt-5" or "anthropic:claude-opus-4-7"\n  --resume [id]          resume prior session (most recent if id omitted)\n  -h, --help             this message\n\nfirst run with no API key: rawdog drops into an interactive setup screen.\nenv: OPENAI_API_KEY / ANTHROPIC_API_KEY / RAWDOG_PROVIDER\n\nslash commands in TUI:\n  /help /cost /context /sessions /compact /init /clear /new\n  /paste /attach /drop /restart /model /login /resume /todo /agents /docs /exit /quit\n`;
 
-const cliArgs = parseArgv(process.argv.slice(2));
+const loginSubcommand = process.argv[2] === "login"
+  ? (() => {
+      const p = process.argv[3];
+      return p === "openai" || p === "anthropic" ? p : "pick";
+    })()
+  : null;
+
+const cliArgs = loginSubcommand
+  ? { headless: false, resumeId: undefined, modelSpec: "", prompt: "", showHelp: false }
+  : parseArgv(process.argv.slice(2));
 if (cliArgs.showHelp) {
   process.stdout.write(HELP_TEXT);
   process.exit(0);
@@ -259,20 +286,16 @@ const pickOptions: PickOptions = {
   anthropicModel: rawdogConfig.anthropicModel,
 };
 
-// Fail fast BEFORE rendering the TUI — otherwise ink takes over the terminal
-// and error messages get swallowed / Enter does nothing.
-let initialProvider: Provider;
-try {
-  initialProvider = pickProvider(pickOptions);
-} catch (e: any) {
-  process.stderr.write(`\nrawdog: ${e.message}\n`);
-  process.stderr.write(
-    `\nSet it in your shell:\n  export OPENAI_API_KEY=sk-...\n`,
-  );
-  process.stderr.write(
-    `Or create a .env file in this directory (bun auto-loads it).\n\n`,
-  );
-  process.exit(1);
+function renderSetup(initial?: "openai" | "anthropic"): Promise<"openai" | "anthropic"> {
+  return new Promise((resolve, reject) => {
+    const instance = render(
+      <SetupScreen
+        initialProvider={initial}
+        onDone={(picked) => { instance.unmount(); resolve(picked); }}
+        onAbort={() => { instance.unmount(); reject(new Error("setup aborted")); }}
+      />,
+    );
+  });
 }
 
 // If stdin was piped in (non-TTY) and --print wasn't set, force headless —
@@ -289,7 +312,7 @@ async function readStdinIfPiped(): Promise<string> {
 }
 
 async function runHeadless(provider: Provider, args: CliArgs) {
-  const { system } = buildSystem(process.cwd());
+  const { system } = buildSystem(process.cwd(), loadSkills(process.cwd()));
   const stdin = (await readStdinIfPiped()).trim();
   const prompt = [stdin, args.prompt].filter(Boolean).join("\n\n").trim();
   if (!prompt) {
@@ -359,15 +382,37 @@ type LogEntry =
   | { kind: "thinking"; text: string }
   | { kind: "tool"; name: string; input: string; output?: string }
   | { kind: "system"; text: string }
-  | { kind: "meta"; text: string };
+  | { kind: "meta"; text: string }
+  | {
+      kind: "table";
+      heading?: string;
+      rows: Array<{ name: string; desc: string; nameColor?: string }>;
+      footer?: string;
+    };
 
-function formatComposerMeta(provider: Provider, usage: TurnUsage | null) {
+function contextPercentColor(pct: number) {
+  if (pct >= 90) return "red";
+  if (pct >= 70) return "#ff8c00";
+  if (pct >= 40) return "yellow";
+  return "green";
+}
+
+function ComposerMeta({ provider, usage }: { provider: Provider; usage: TurnUsage | null }) {
   const modelLabel = provider.model;
-  if (!usage) return modelLabel;
+  if (!usage) return <Text color="gray">{modelLabel}</Text>;
   const windowSize = estimateContextWindow(provider);
-  if (!windowSize) return `${modelLabel} | ${usage.input.toLocaleString()} tok`;
-  const percent = ((usage.input / windowSize) * 100).toFixed(1);
-  return `${modelLabel} | ${percent}% context`;
+  if (!windowSize) {
+    return <Text color="gray">{`${modelLabel} | ${usage.input.toLocaleString()} tok`}</Text>;
+  }
+  const pct = (usage.input / windowSize) * 100;
+  const percent = pct.toFixed(1);
+  return (
+    <Text color="gray">
+      {`${modelLabel} | `}
+      <Text color={contextPercentColor(pct)}>{`${percent}%`}</Text>
+      {" context"}
+    </Text>
+  );
 }
 
 const PINK = "#ff5fc8";
@@ -381,8 +426,7 @@ function renderEntry(entry: LogEntry, key: number, columns: number) {
     return (
       <Box key={key} flexDirection="column" marginTop={1}>
         {lines.map((line, i) => {
-          const padded = line + " ".repeat(Math.max(0, columns - 1 - line.length));
-          const body = i === 0 ? padded.slice(prefix.length) : padded;
+          const body = i === 0 ? line.slice(prefix.length) : line;
           return (
             <Text key={i} backgroundColor="#202020">
               {i === 0 ? <Text color="cyan">{prefix}</Text> : null}
@@ -427,6 +471,27 @@ function renderEntry(entry: LogEntry, key: number, columns: number) {
       </Box>
     );
   }
+  if (entry.kind === "table") {
+    const nameWidth = Math.max(1, ...entry.rows.map((r) => r.name.length)) + 2;
+    return (
+      <Box key={key} flexDirection="column" marginTop={1}>
+        {entry.heading ? <Text color="magenta">{entry.heading}</Text> : null}
+        {entry.rows.map((r, i) => (
+          <Box key={i}>
+            <Box width={nameWidth}>
+              <Text color={r.nameColor ?? PINK}>{r.name}</Text>
+            </Box>
+            <Text color="gray">{r.desc}</Text>
+          </Box>
+        ))}
+        {entry.footer ? (
+          <Box marginTop={1}>
+            <Text color="gray">{entry.footer}</Text>
+          </Box>
+        ) : null}
+      </Box>
+    );
+  }
   // tool
   let summary = entry.input;
   try {
@@ -452,13 +517,17 @@ type QueueItem = { payload: string | ContentBlock[]; displayText: string };
 const BUILTIN_COMMANDS: Array<{ name: string; desc: string }> = [
   { name: "/help", desc: "list commands" },
   { name: "/cost", desc: "show token usage + estimated spend" },
-  { name: "/context", desc: "show loaded AGENTS.md / .rawdog context" },
+  { name: "/context", desc: "show context window usage + token breakdown" },
   { name: "/sessions", desc: "list recent session transcripts" },
   { name: "/compact", desc: "summarize history now to free context" },
-  { name: "/init", desc: "create .rawdog/AGENTS.md in the current dir" },
+  { name: "/init", desc: "create or update AGENTS.md at the repo root" },
   { name: "/model", desc: "switch provider/model: /model <spec>" },
+  { name: "/login", desc: "show API key storage path; to set/rotate, run `rawdog login` from a shell" },
   { name: "/resume", desc: "list recent sessions; /resume <id> to load" },
   { name: "/todo", desc: "show persistent todo list" },
+  { name: "/agents", desc: "list/show/rm named subagents; /agents new <name> builds one" },
+  { name: "/skills", desc: "list/show/rm skills; /skills new <name> builds one" },
+  { name: "/docs", desc: "list rawdog's bundled docs; /docs <name> to read one" },
   { name: "/clear", desc: "start a new conversation (alias: /new)" },
   { name: "/new", desc: "start a new conversation (alias: /clear)" },
   { name: "/paste", desc: "paste image from clipboard" },
@@ -543,6 +612,7 @@ type AppProps = {
   initialPrompt?: string;
   resumeId?: string | null;
   customCommands: CustomCommand[];
+  initialSkills: Skill[];
   mcp: McpSession;
 };
 
@@ -551,14 +621,16 @@ function App({
   initialPrompt,
   resumeId,
   customCommands,
+  initialSkills,
   mcp,
 }: AppProps) {
+  const [skills, setSkills] = useState<Skill[]>(initialSkills);
   const { exit } = useApp();
   const [provider, setProvider] = useState<Provider>(initialProvider);
   const abortRef = useRef<AbortController | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [queuedCount, setQueuedCount] = useState(0);
+  const [queued, setQueued] = useState<QueueItem[]>([]);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [liveEntry, setLiveEntry] = useState<LogEntry | null>(null);
   const liveRef = useRef<LogEntry | null>(null);
@@ -579,6 +651,12 @@ function App({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [welcome, setWelcome] = useState<string>(() => pickWelcome());
   const [clearEpoch, setClearEpoch] = useState(0);
+  type AgentsPanel =
+    | { mode: "list"; selected: number }
+    | { mode: "actions"; agentName: string; selected: number }
+    | { mode: "create"; buffer: string };
+  const [agentsPanel, setAgentsPanel] = useState<AgentsPanel | null>(null);
+  const [agentsList, setAgentsList] = useState<SubAgent[]>([]);
   const agentRef = useRef<ReturnType<typeof createAgent> | null>(null);
   const systemRef = useRef<string>(BASE_SYSTEM);
   const loadedCtxRef = useRef<string[]>([]);
@@ -586,8 +664,44 @@ function App({
   const queueRef = useRef<QueueItem[]>([]);
   const runningRef = useRef(false);
 
+  const syncQueue = () => setQueued([...queueRef.current]);
+
+  const mergeQueued = (items: QueueItem[]): QueueItem => {
+    const displayText = items.map((i) => i.displayText).join("\n\n");
+    const anyBlocks = items.some((i) => Array.isArray(i.payload));
+    if (!anyBlocks) {
+      const payload = (items.map((i) => i.payload as string).filter(Boolean)).join(
+        "\n\n",
+      );
+      return { payload, displayText };
+    }
+    const texts: string[] = [];
+    const images: ContentBlock[] = [];
+    for (const item of items) {
+      if (typeof item.payload === "string") {
+        if (item.payload) texts.push(item.payload);
+      } else {
+        for (const b of item.payload) {
+          if (b.type === "text") texts.push(b.text);
+          else images.push(b);
+        }
+      }
+    }
+    const combined: ContentBlock[] = [];
+    if (texts.length) combined.push({ type: "text", text: texts.join("\n\n") });
+    combined.push(...images);
+    return { payload: combined, displayText };
+  };
+
+  const clearQueue = () => {
+    if (queueRef.current.length === 0) return false;
+    queueRef.current = [];
+    syncQueue();
+    return true;
+  };
+
   useEffect(() => {
-    const { system, loaded } = buildSystem(process.cwd());
+    const { system, loaded } = buildSystem(process.cwd(), skills);
     systemRef.current = system;
     loadedCtxRef.current = loaded;
     const extraTools = mcp.tools.map((t) => ({ def: t.def, run: t.run }));
@@ -640,6 +754,9 @@ function App({
     if (customCommands.length > 0) {
       parts.push(`custom: ${customCommands.map((c) => "/" + c.name).join(", ")}`);
     }
+    if (skills.length > 0) {
+      parts.push(`skills: ${skills.map((s) => "/" + s.name).join(", ")}`);
+    }
     if (sessionRef.current) parts.push(`session: ${sessionRef.current.id}`);
     if (parts.length > 0) {
       setLog((l) => [...l, { kind: "system", text: parts.join("\n") }]);
@@ -647,7 +764,7 @@ function App({
     // Auto-submit any prompt passed on the CLI.
     if (initialPrompt) {
       queueRef.current.push({ payload: initialPrompt, displayText: initialPrompt });
-      setQueuedCount(queueRef.current.length);
+      syncQueue();
       drainQueue();
     }
   }, []);
@@ -678,11 +795,187 @@ function App({
     return () => clearInterval(t);
   }, [busy]);
 
+  const triggerAgentBuilder = (name: string) => {
+    const targetPath = join(agentsDir(process.cwd()), `${name}.md`);
+    const allTools = baseToolDefs.map((d) => d.name).join(", ");
+    const builderPrompt =
+      `Help me design a new persistent subagent named \`${name}\`.\n\n` +
+      `Ask me (one question at a time, concisely) for:\n` +
+      `1. a one-line description\n` +
+      `2. which tools it should have access to from this list: ${allTools} (comma-separated subset, or "all")\n` +
+      `3. optional model override (e.g. gpt-5-mini, anthropic:claude-opus-4-7) — ok to skip\n` +
+      `4. the system prompt body (can be multiple paragraphs)\n\n` +
+      `Once I confirm, call the \`write\` tool to save the file at exactly:\n` +
+      `  ${targetPath}\n\n` +
+      `Contents must be YAML frontmatter followed by the system prompt body, in exactly this format:\n\n` +
+      "```\n" +
+      `---\n` +
+      `name: ${name}\n` +
+      `description: <one-line description>\n` +
+      `tools: read,grep,glob\n` +
+      `model: gpt-5-mini\n` +
+      `---\n` +
+      `<system prompt body goes here, plain text, no wrapping quotes>\n` +
+      "```\n\n" +
+      `Omit the \`tools:\` line if the user wants all tools. Omit the \`model:\` line if no override. Do NOT wrap values in quotes. Do NOT include the triple-backtick fences in the saved file — they are just for this example. Confirm the save by quoting back the final path.`;
+    setLog((l) => [
+      ...l,
+      {
+        kind: "system",
+        text: `building agent '${name}' — answer the prompts below. target: ${targetPath}`,
+      },
+    ]);
+    queueRef.current.push({ payload: builderPrompt, displayText: `/agents new ${name}` });
+    syncQueue();
+    drainQueue();
+  };
+
   useInput((_input, key) => {
     if (key.ctrl && _input === "c") exit();
-    if (key.escape && abortRef.current) {
-      abortRef.current.abort();
-      setStatus("aborting...");
+    if (agentsPanel) {
+      if (key.escape) {
+        setAgentsPanel(null);
+        return;
+      }
+      if (agentsPanel.mode === "list") {
+        const total = agentsList.length + 1;
+        if (key.upArrow) {
+          setAgentsPanel({ mode: "list", selected: Math.max(0, agentsPanel.selected - 1) });
+          return;
+        }
+        if (key.downArrow) {
+          setAgentsPanel({ mode: "list", selected: Math.min(total - 1, agentsPanel.selected + 1) });
+          return;
+        }
+        if (key.return) {
+          if (agentsPanel.selected === 0) {
+            setAgentsPanel({ mode: "create", buffer: "" });
+            return;
+          }
+          const picked = agentsList[agentsPanel.selected - 1];
+          if (picked) setAgentsPanel({ mode: "actions", agentName: picked.name, selected: 0 });
+          return;
+        }
+        return;
+      }
+      if (agentsPanel.mode === "actions") {
+        const actions = ["show", "spawn", "remove", "back"];
+        if (key.upArrow) {
+          setAgentsPanel({ ...agentsPanel, selected: Math.max(0, agentsPanel.selected - 1) });
+          return;
+        }
+        if (key.downArrow) {
+          setAgentsPanel({
+            ...agentsPanel,
+            selected: Math.min(actions.length - 1, agentsPanel.selected + 1),
+          });
+          return;
+        }
+        if (key.return) {
+          const act = actions[agentsPanel.selected];
+          const agent = loadAgent(process.cwd(), agentsPanel.agentName);
+          if (act === "back" || !agent) {
+            setAgentsPanel({ mode: "list", selected: 0 });
+            return;
+          }
+          if (act === "show") {
+            let raw = "";
+            try {
+              raw = readFileSync(agent.path, "utf8");
+            } catch (e: any) {
+              raw = `(read failed: ${e.message})`;
+            }
+            setLog((l) => [...l, { kind: "system", text: `${agent.path}\n\n${raw}` }]);
+            setAgentsPanel(null);
+            return;
+          }
+          if (act === "spawn") {
+            setInput(`use the ${agent.name} subagent to `);
+            setAgentsPanel(null);
+            return;
+          }
+          if (act === "remove") {
+            try {
+              unlinkSync(agent.path);
+              setLog((l) => [...l, { kind: "system", text: `removed ${agent.path}` }]);
+            } catch (e: any) {
+              setLog((l) => [...l, { kind: "system", text: `rm failed: ${e.message}` }]);
+            }
+            setAgentsList(loadAgents(process.cwd()));
+            setAgentsPanel({ mode: "list", selected: 0 });
+            return;
+          }
+        }
+        return;
+      }
+      if (agentsPanel.mode === "create") {
+        if (key.return) {
+          const name = agentsPanel.buffer.trim().toLowerCase();
+          if (!name) return;
+          if (!isValidAgentName(name)) {
+            setLog((l) => [
+              ...l,
+              { kind: "system", text: `invalid name '${name}' — use [a-z0-9_-]+` },
+            ]);
+            setAgentsPanel(null);
+            return;
+          }
+          if (loadAgent(process.cwd(), name)) {
+            setLog((l) => [
+              ...l,
+              { kind: "system", text: `'${name}' already exists` },
+            ]);
+            setAgentsPanel(null);
+            return;
+          }
+          setAgentsPanel(null);
+          triggerAgentBuilder(name);
+          return;
+        }
+        if (key.backspace || key.delete) {
+          setAgentsPanel({ mode: "create", buffer: agentsPanel.buffer.slice(0, -1) });
+          return;
+        }
+        if (_input && !key.ctrl && !key.meta && _input.length >= 1) {
+          setAgentsPanel({ mode: "create", buffer: agentsPanel.buffer + _input });
+          return;
+        }
+        return;
+      }
+      return;
+    }
+    if (key.upArrow && input === "" && queueRef.current.length > 0) {
+      const texts: string[] = [];
+      const imgs: Attachment[] = [];
+      for (const q of queueRef.current) {
+        if (typeof q.payload === "string") {
+          if (q.payload) texts.push(q.payload);
+        } else {
+          for (const b of q.payload) {
+            if (b.type === "text") texts.push(b.text);
+            else if (b.type === "image") {
+              imgs.push({
+                label: `queued-${imgs.length + 1}.img`,
+                mediaType: b.mediaType,
+                data: b.data,
+              });
+            }
+          }
+        }
+      }
+      setInput(texts.filter(Boolean).join("\n\n"));
+      if (imgs.length) setAttachments((a) => [...a, ...imgs]);
+      clearQueue();
+      return;
+    }
+    if (key.escape) {
+      const hadQueue = clearQueue();
+      if (abortRef.current) {
+        abortRef.current.abort();
+        setStatus("aborting...");
+      } else if (hadQueue) {
+        setLog((l) => [...l, { kind: "system", text: "queue cleared" }]);
+      }
     }
     if (key.ctrl && _input === "v") {
       // Ctrl+V: grab an image from the clipboard and attach. Terminals
@@ -706,7 +999,27 @@ function App({
     }
   });
 
+  // Coalesce rapid-fire live updates during streaming. Without this, a token
+  // stream triggers one setState per chunk, which in turn emits an ANSI repaint
+  // per frame — enough to keep the terminal pinned at the bottom and make the
+  // scrollback feel un-scrollable while output is flowing.
+  const liveFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleLiveFlush = () => {
+    if (liveFlushTimerRef.current) return;
+    liveFlushTimerRef.current = setTimeout(() => {
+      liveFlushTimerRef.current = null;
+      setLiveEntry(liveRef.current);
+    }, 40);
+  };
+  const cancelLiveFlush = () => {
+    if (liveFlushTimerRef.current) {
+      clearTimeout(liveFlushTimerRef.current);
+      liveFlushTimerRef.current = null;
+    }
+  };
+
   const commitLive = () => {
+    cancelLiveFlush();
     const committing = liveRef.current;
     if (committing) {
       setLog((l) => [...l, committing]);
@@ -742,7 +1055,7 @@ function App({
               text: liveRef.current.text + ev.text,
             };
           }
-          setLiveEntry(liveRef.current);
+          scheduleLiveFlush();
         } else if (ev.type === "thinking") {
           thinkingTailRef.current = (thinkingTailRef.current + ev.text)
             .replace(/\s+/g, " ")
@@ -847,9 +1160,10 @@ function App({
     runningRef.current = true;
     try {
       while (queueRef.current.length > 0) {
-        const next = queueRef.current.shift()!;
-        setQueuedCount(queueRef.current.length);
-        await runOne(next);
+        const batch = queueRef.current;
+        queueRef.current = [];
+        syncQueue();
+        await runOne(mergeQueued(batch));
       }
     } finally {
       runningRef.current = false;
@@ -885,45 +1199,88 @@ function App({
       setInput("");
       const all = [
         ...BUILTIN_COMMANDS,
+        ...skills.map((s) => ({ name: "/" + s.name, desc: `[skill] ${s.description}` })),
         ...customCommands.map((c) => ({ name: "/" + c.name, desc: c.description })),
       ];
-      const nameWidth = Math.max(...all.map((c) => c.name.length)) + 2;
-      const lines = all.map(
-        (c) => c.name + " ".repeat(nameWidth - c.name.length) + c.desc,
-      );
       setLog((l) => [
         ...l,
-        { kind: "system", text: "commands:\n" + lines.join("\n") },
+        { kind: "table", heading: "commands:", rows: all },
       ]);
       return;
     }
     if (text === "/context") {
       setInput("");
       const loaded = loadedCtxRef.current;
+      const approxTokens = (str: string) => Math.ceil(str.length / 4);
+      const sysTotal = approxTokens(systemRef.current);
+      const baseSysTok = approxTokens(BASE_SYSTEM);
+      const projectCtxTok = Math.max(0, sysTotal - baseSysTok);
+      const disabled = new Set(rawdogConfig.tools?.disabled ?? []);
+      const activeBase = baseToolDefs.filter((d) => !disabled.has(d.name));
+      const baseToolTok = approxTokens(activeBase.map((d) => JSON.stringify(d)).join(""));
+      const mcpToolTok = approxTokens(mcp.tools.map((t) => JSON.stringify(t.def)).join(""));
+      const messages = agentRef.current?.state.messages ?? [];
+      const msgTok = approxTokens(JSON.stringify(messages));
+      const estTotal = sysTotal + baseToolTok + mcpToolTok + msgTok;
+      const actual = usage?.input;
+      const windowSize = estimateContextWindow(provider);
+      const used = actual ?? estTotal;
+      const fmt = (n: number) => n.toLocaleString();
+      const lines: string[] = [];
+      lines.push(`context — ${provider.model}${windowSize ? ` (${fmt(windowSize)} tok window)` : ""}`);
+      if (windowSize) {
+        const fraction = Math.min(1, used / windowSize);
+        const barWidth = 28;
+        const filled = Math.round(fraction * barWidth);
+        const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
+        const pct = (fraction * 100).toFixed(1);
+        const free = Math.max(0, windowSize - used);
+        lines.push(`${bar}  ${fmt(used)} / ${fmt(windowSize)}  (${pct}%)`);
+        lines.push(`free: ${fmt(free)} tok`);
+      } else {
+        lines.push(`no window known — estimated total: ${fmt(estTotal)} tok`);
+      }
+      lines.push("");
+      lines.push("breakdown (estimated, chars/4):");
+      const pad = (n: number) => fmt(n).padStart(7);
+      lines.push(`  base system       ${pad(baseSysTok)} tok`);
+      lines.push(`  project context   ${pad(projectCtxTok)} tok  (${loaded.length} file${loaded.length === 1 ? "" : "s"})`);
+      for (const pth of loaded) lines.push(`    ${pth}`);
+      const disabledNote = disabled.size ? `, ${disabled.size} disabled` : "";
+      lines.push(`  base tools        ${pad(baseToolTok)} tok  (${activeBase.length} tool${activeBase.length === 1 ? "" : "s"}${disabledNote})`);
+      const mcpServerNote = mcp.serverInfo.length ? `, ${mcp.serverInfo.length} server${mcp.serverInfo.length === 1 ? "" : "s"}` : "";
+      lines.push(`  mcp tools         ${pad(mcpToolTok)} tok  (${mcp.tools.length} tool${mcp.tools.length === 1 ? "" : "s"}${mcpServerNote})`);
+      lines.push(`  messages          ${pad(msgTok)} tok  (${messages.length} msg${messages.length === 1 ? "" : "s"})`);
+      if (actual !== undefined) {
+        lines.push("");
+        const cacheNote = cumUsage.cacheRead ? ` (${fmt(cumUsage.cacheRead)} cache read cum.)` : "";
+        lines.push(`last turn actual: ${fmt(actual)} input tok${cacheNote}`);
+      }
+      lines.push("");
       const cfgPath = configPath(process.cwd());
-      const cfgLine = existsSync(cfgPath) ? `config: ${cfgPath}` : `config: (none at ${cfgPath})`;
-      const mcpLine =
+      lines.push(existsSync(cfgPath) ? `config: ${cfgPath}` : `config: (none at ${cfgPath})`);
+      lines.push(
         mcp.serverInfo.length === 0
           ? "mcp: (no .rawdog/mcp.json)"
           : "mcp: " +
             mcp.serverInfo
-              .map((s) => (s.error ? `${s.name}✗ ${s.error}` : `${s.name}(${s.tools})`))
-              .join(", ");
-      const cmdLine =
+              .map((srv) => (srv.error ? `${srv.name}✗ ${srv.error}` : `${srv.name}(${srv.tools})`))
+              .join(", "),
+      );
+      lines.push(
         customCommands.length === 0
           ? "custom commands: (none)"
-          : "custom commands: " + customCommands.map((c) => "/" + c.name).join(", ");
-      const ctxLine =
-        loaded.length === 0
-          ? "no project context loaded (drop an AGENTS.md or .rawdog/context.md nearby)"
-          : "loaded context:\n" + loaded.map((p) => "  " + p).join("\n");
-      setLog((l) => [
-        ...l,
-        {
-          kind: "system",
-          text: [ctxLine, cfgLine, mcpLine, cmdLine].join("\n"),
-        },
-      ]);
+          : "custom commands: " + customCommands.map((c) => "/" + c.name).join(", "),
+      );
+      lines.push(
+        skills.length === 0
+          ? "skills: (none)"
+          : "skills: " +
+            skills
+              .map((s) => `/${s.name}${s.source === "user" ? "~" : ""}`)
+              .join(", "),
+      );
+      setLog((l) => [...l, { kind: "system", text: lines.join("\n") }]);
       return;
     }
     if (text === "/sessions") {
@@ -998,48 +1355,40 @@ function App({
     }
     if (text === "/init") {
       setInput("");
-      const dir = join(process.cwd(), ".rawdog");
-      const target = join(dir, "AGENTS.md");
-      try {
-        if (existsSync(target)) {
-          setLog((l) => [
-            ...l,
-            { kind: "system", text: `${target} already exists — leaving it alone` },
-          ]);
-          return;
-        }
-        const { mkdirSync, writeFileSync } = require("node:fs");
-        mkdirSync(dir, { recursive: true });
-        const cwdName = basename(process.cwd());
-        const template = `# ${cwdName}
+      const target = join(process.cwd(), "AGENTS.md");
+      const exists = existsSync(target);
+      const initPrompt = exists
+        ? `Update \`AGENTS.md\` at the repo root (${target}).
 
-<!-- rawdog auto-loads this file into every turn's system prompt. Keep it short. -->
+rawdog auto-loads this file into every turn's system prompt, so it's high-leverage context for any agent working here — keep it tight and evergreen.
 
-## What this project is
+Steps:
+1. Read the current \`AGENTS.md\`.
+2. Scan the repo (package manifests, build/test config, top-level dirs, README, entrypoints) to check what's stale, missing, or wrong.
+3. Edit \`AGENTS.md\` in place: fix inaccuracies, fill gaps, drop dead sections. Don't rewrite from scratch if the existing structure is fine.
 
-(one sentence)
+Cover when relevant: one-line project description, key directories, build/test/run commands, conventions worth knowing, anything non-obvious a new agent should know. Omit sections you have nothing useful to say about. No deadlines or snapshots of active work.`
+        : `Create \`AGENTS.md\` at the repo root (${target}).
 
-## Conventions worth knowing
+rawdog auto-loads this file into every turn's system prompt, so it's high-leverage context for any agent working here — keep it tight and evergreen.
 
--
+Steps:
+1. Scan the repo (package manifests, build/test config, top-level dirs, README, entrypoints) to understand what this project is and how it's built.
+2. Write \`AGENTS.md\` with the findings.
 
-## Commands
-
-- build:
-- test:
-- run:
-`;
-        writeFileSync(target, template, "utf8");
-        setLog((l) => [
-          ...l,
-          { kind: "system", text: `created ${target} — edit it, then /restart to load` },
-        ]);
-      } catch (e: any) {
-        setLog((l) => [
-          ...l,
-          { kind: "system", text: `init failed: ${e.message}` },
-        ]);
-      }
+Cover when relevant: one-line project description, key directories, build/test/run commands, conventions worth knowing, anything non-obvious a new agent should know. Omit sections you have nothing useful to say about. No deadlines or snapshots of active work. Aim for ~40 lines or less.`;
+      setLog((l) => [
+        ...l,
+        {
+          kind: "system",
+          text: exists
+            ? "scanning repo to update AGENTS.md…"
+            : "scanning repo to write AGENTS.md…",
+        },
+      ]);
+      queueRef.current.push({ payload: initPrompt, displayText: "/init" });
+      syncQueue();
+      drainQueue();
       return;
     }
     if (text === "/clear" || text === "/new") {
@@ -1153,6 +1502,21 @@ function App({
       }
       return;
     }
+    if (text === "/login" || text.startsWith("/login ")) {
+      setInput("");
+      const hasOpenAI = !!process.env.OPENAI_API_KEY;
+      const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
+      const status =
+        `keys loaded: openai=${hasOpenAI ? "yes" : "no"}  anthropic=${hasAnthropic ? "yes" : "no"}\n` +
+        `storage:     ${userEnvPath()} (chmod 600)\n` +
+        `\n` +
+        `to set or rotate a key, exit rawdog and run:\n` +
+        `  rawdog login            # provider picker\n` +
+        `  rawdog login openai\n` +
+        `  rawdog login anthropic`;
+      setLog((l) => [...l, { kind: "system", text: status }]);
+      return;
+    }
     if (text === "/resume" || text.startsWith("/resume ")) {
       setInput("");
       const arg = text === "/resume" ? "" : text.slice("/resume ".length).trim();
@@ -1204,6 +1568,316 @@ function App({
         setLog((l) => [...l, { kind: "system", text: `todo error: ${e.message}` }]);
       }
       return;
+    }
+
+    if (text === "/docs" || text.startsWith("/docs ")) {
+      setInput("");
+      const rest = text === "/docs" ? "" : text.slice("/docs ".length).trim();
+      try {
+        const { toolMap } = await import("./tools.ts");
+        const handler = toolMap["docs"];
+        if (!handler) {
+          setLog((l) => [...l, { kind: "system", text: "docs tool not available" }]);
+          return;
+        }
+        const out = rest
+          ? await handler({ action: "read", name: rest })
+          : await handler({ action: "list" });
+        setLog((l) => [...l, { kind: "system", text: out }]);
+      } catch (e: any) {
+        setLog((l) => [...l, { kind: "system", text: `docs error: ${e.message}` }]);
+      }
+      return;
+    }
+
+    if (text === "/skills" || text.startsWith("/skills ")) {
+      setInput("");
+      const rest = text === "/skills" ? "" : text.slice("/skills ".length).trim();
+      const [sub, ...argParts] = rest.split(/\s+/).filter(Boolean);
+      const argName = argParts.join(" ").trim().toLowerCase();
+      const dir = skillsDir(process.cwd(), "project");
+      const reloadSkills = () => {
+        const fresh = loadSkills(process.cwd());
+        setSkills(fresh);
+        return fresh;
+      };
+      try {
+        if (!sub) {
+          const current = reloadSkills();
+          if (current.length === 0) {
+            setLog((l) => [
+              ...l,
+              {
+                kind: "system",
+                text:
+                  `no skills in ${dir}\n` +
+                  `create one: /skills new <name>`,
+              },
+            ]);
+          } else {
+            setLog((l) => [
+              ...l,
+              {
+                kind: "table",
+                heading: `skills (project dir: ${dir}):`,
+                rows: current.map((s) => ({
+                  name: s.name,
+                  desc: `${s.description}  (${s.source}${s.invisible ? "" : ", visible"})`,
+                })),
+                footer:
+                  "invoke via /<name> [args]\n" +
+                  "build a new one: /skills new <name>",
+              },
+            ]);
+          }
+          return;
+        }
+        if (sub === "show") {
+          if (!argName || !isValidSkillName(argName)) {
+            setLog((l) => [...l, { kind: "system", text: "usage: /skills show <name>" }]);
+            return;
+          }
+          const found = reloadSkills().find((s) => s.name === argName);
+          if (!found) {
+            setLog((l) => [...l, { kind: "system", text: `no skill '${argName}'` }]);
+            return;
+          }
+          let raw = "";
+          try {
+            raw = readFileSync(found.path, "utf8");
+          } catch (e: any) {
+            raw = `(read failed: ${e.message})`;
+          }
+          setLog((l) => [...l, { kind: "system", text: `${found.path}\n\n${raw}` }]);
+          return;
+        }
+        if (sub === "rm") {
+          if (!argName || !isValidSkillName(argName)) {
+            setLog((l) => [...l, { kind: "system", text: "usage: /skills rm <name>" }]);
+            return;
+          }
+          const found = skills.find((s) => s.name === argName);
+          if (!found) {
+            setLog((l) => [...l, { kind: "system", text: `no skill '${argName}'` }]);
+            return;
+          }
+          if (found.source !== "project") {
+            setLog((l) => [
+              ...l,
+              {
+                kind: "system",
+                text: `'${argName}' is a user-global skill — remove it manually: rm -r ${found.dir}`,
+              },
+            ]);
+            return;
+          }
+          try {
+            const { rmSync } = require("node:fs");
+            rmSync(found.dir, { recursive: true, force: true });
+            reloadSkills();
+            setLog((l) => [...l, { kind: "system", text: `removed ${found.dir}` }]);
+          } catch (e: any) {
+            setLog((l) => [...l, { kind: "system", text: `rm failed: ${e.message}` }]);
+          }
+          return;
+        }
+        if (sub === "new") {
+          if (!argName || !isValidSkillName(argName)) {
+            setLog((l) => [
+              ...l,
+              { kind: "system", text: "usage: /skills new <name>  (lowercase letters/digits/_-, not reserved)" },
+            ]);
+            return;
+          }
+          if (skills.find((s) => s.name === argName)) {
+            setLog((l) => [
+              ...l,
+              { kind: "system", text: `'${argName}' already exists — /skills show ${argName} or /skills rm ${argName}` },
+            ]);
+            return;
+          }
+          const targetPath = skillPath(process.cwd(), argName, "project");
+          const builderPrompt =
+            `Help me design a new rawdog skill named \`${argName}\`.\n\n` +
+            `Skills are invisible prompt templates invoked via /<name>. The user sees only their /${argName} bubble; the full instructions go to the model silently. When the skill runs, a fresh turn starts with the expanded body as the user message — so the body should read as a self-contained instruction.\n\n` +
+            `Ask me (one question at a time, concisely) for:\n` +
+            `1. a one-line description (shown in /help and injected into the system prompt so I know when to reach for it)\n` +
+            `2. whether invocations need arguments; if so, how \`$ARGS\` slots into the body\n` +
+            `3. the body — a clear instruction for whatever rawdog should do when this skill fires (steps, focus areas, what to output)\n` +
+            `4. should it be invisible (default, recommended) or visible (body echoed into the log as a user message)\n\n` +
+            `Once I confirm, call the \`write\` tool to save the file at exactly:\n` +
+            `  ${targetPath}\n\n` +
+            `Contents must be YAML frontmatter followed by the body, in exactly this format:\n\n` +
+            "```\n" +
+            `---\n` +
+            `name: ${argName}\n` +
+            `description: <one-line description>\n` +
+            `invisible: true\n` +
+            `---\n` +
+            `<skill body — plain markdown, use $ARGS where user-supplied args should slot in>\n` +
+            "```\n\n" +
+            `Notes: set \`invisible: false\` only if the user picked visible. Do NOT wrap values in quotes. Do NOT include the triple-backtick fences in the saved file. After saving, tell the user the skill is live — /skills reloads the list, or /restart picks it up everywhere.`;
+          setLog((l) => [
+            ...l,
+            {
+              kind: "system",
+              text: `building skill '${argName}' — answer the prompts below. target: ${targetPath}`,
+            },
+          ]);
+          queueRef.current.push({ payload: builderPrompt, displayText: `/skills new ${argName}` });
+          syncQueue();
+          drainQueue();
+          return;
+        }
+        setLog((l) => [
+          ...l,
+          {
+            kind: "system",
+            text: "usage: /skills | /skills show <name> | /skills rm <name> | /skills new <name>",
+          },
+        ]);
+      } catch (e: any) {
+        setLog((l) => [...l, { kind: "system", text: `skills error: ${e.message}` }]);
+      }
+      return;
+    }
+
+    if (text === "/agents" || text.startsWith("/agents ")) {
+      setInput("");
+      const rest = text === "/agents" ? "" : text.slice("/agents ".length).trim();
+      const [sub, ...argParts] = rest.split(/\s+/).filter(Boolean);
+      const argName = argParts.join(" ").trim();
+      try {
+        if (!sub) {
+          setAgentsList(loadAgents(process.cwd()));
+          setAgentsPanel({ mode: "list", selected: 0 });
+          return;
+        }
+        if (sub === "show") {
+          if (!argName || !isValidAgentName(argName)) {
+            setLog((l) => [...l, { kind: "system", text: "usage: /agents show <name>" }]);
+            return;
+          }
+          const agent = loadAgent(process.cwd(), argName);
+          if (!agent) {
+            setLog((l) => [...l, { kind: "system", text: `no agent '${argName}'` }]);
+            return;
+          }
+          let raw = "";
+          try {
+            raw = readFileSync(agent.path, "utf8");
+          } catch (e: any) {
+            raw = `(read failed: ${e.message})`;
+          }
+          setLog((l) => [...l, { kind: "system", text: `${agent.path}\n\n${raw}` }]);
+          return;
+        }
+        if (sub === "rm") {
+          if (!argName || !isValidAgentName(argName)) {
+            setLog((l) => [...l, { kind: "system", text: "usage: /agents rm <name>" }]);
+            return;
+          }
+          const agent = loadAgent(process.cwd(), argName);
+          if (!agent) {
+            setLog((l) => [...l, { kind: "system", text: `no agent '${argName}'` }]);
+            return;
+          }
+          try {
+            const { unlinkSync } = require("node:fs");
+            unlinkSync(agent.path);
+            setLog((l) => [...l, { kind: "system", text: `removed ${agent.path}` }]);
+          } catch (e: any) {
+            setLog((l) => [...l, { kind: "system", text: `rm failed: ${e.message}` }]);
+          }
+          return;
+        }
+        if (sub === "new") {
+          if (!argName || !isValidAgentName(argName)) {
+            setLog((l) => [
+              ...l,
+              { kind: "system", text: "usage: /agents new <name>  (lowercase letters, digits, _ -)" },
+            ]);
+            return;
+          }
+          if (loadAgent(process.cwd(), argName)) {
+            setLog((l) => [
+              ...l,
+              { kind: "system", text: `'${argName}' already exists — /agents show ${argName} or /agents rm ${argName}` },
+            ]);
+            return;
+          }
+          const targetPath = join(agentsDir(process.cwd()), `${argName}.md`);
+          const allTools = baseToolDefs.map((d) => d.name).join(", ");
+          const builderPrompt =
+            `Help me design a new persistent subagent named \`${argName}\`.\n\n` +
+            `Ask me (one question at a time, concisely) for:\n` +
+            `1. a one-line description\n` +
+            `2. which tools it should have access to from this list: ${allTools} (comma-separated subset, or "all")\n` +
+            `3. optional model override (e.g. gpt-5-mini, anthropic:claude-opus-4-7) — ok to skip\n` +
+            `4. the system prompt body (can be multiple paragraphs)\n\n` +
+            `Once I confirm, call the \`write\` tool to save the file at exactly:\n` +
+            `  ${targetPath}\n\n` +
+            `Contents must be YAML frontmatter followed by the system prompt body, in exactly this format:\n\n` +
+            "```\n" +
+            `---\n` +
+            `name: ${argName}\n` +
+            `description: <one-line description>\n` +
+            `tools: read,grep,glob\n` +
+            `model: gpt-5-mini\n` +
+            `---\n` +
+            `<system prompt body goes here, plain text, no wrapping quotes>\n` +
+            "```\n\n" +
+            `Omit the \`tools:\` line if the user wants all tools. Omit the \`model:\` line if no override. Do NOT wrap values in quotes. Do NOT include the triple-backtick fences in the saved file — they are just for this example. Confirm the save by quoting back the final path.`;
+          setLog((l) => [
+            ...l,
+            {
+              kind: "system",
+              text: `building agent '${argName}' — answer the prompts below. target: ${targetPath}`,
+            },
+          ]);
+          queueRef.current.push({ payload: builderPrompt, displayText: `/agents new ${argName}` });
+          syncQueue();
+          drainQueue();
+          return;
+        }
+        setLog((l) => [
+          ...l,
+          {
+            kind: "system",
+            text: "usage: /agents | /agents show <name> | /agents rm <name> | /agents new <name>",
+          },
+        ]);
+      } catch (e: any) {
+        setLog((l) => [...l, { kind: "system", text: `agents error: ${e.message}` }]);
+      }
+      return;
+    }
+
+    // Skills from .rawdog/skills/<name>/SKILL.md (and ~/.rawdog/skills/).
+    // Skills take precedence over custom commands on name collision; with
+    // invisible: true (default), the expanded body is hidden from the log.
+    if (text.startsWith("/")) {
+      const spaceIdx = text.indexOf(" ");
+      const name = (spaceIdx === -1 ? text.slice(1) : text.slice(1, spaceIdx)).toLowerCase();
+      const args = spaceIdx === -1 ? "" : text.slice(spaceIdx + 1);
+      const skill = skills.find((s) => s.name === name);
+      if (skill) {
+        setInput("");
+        const expanded = expandSkill(skill, args).trim();
+        const display = skill.invisible
+          ? spaceIdx === -1 ? `/${skill.name}` : `/${skill.name} ${args}`
+          : expanded;
+        if (skill.invisible) {
+          setLog((l) => [
+            ...l,
+            { kind: "system", text: `running skill: ${skill.name}` },
+          ]);
+        }
+        queueRef.current.push({ payload: expanded, displayText: display });
+        syncQueue();
+        drainQueue();
+        return;
+      }
     }
 
     // Custom slash commands from .rawdog/commands/*.md
@@ -1279,17 +1953,14 @@ function App({
       : text;
 
     queueRef.current.push({ payload, displayText });
-    setQueuedCount(queueRef.current.length);
+    syncQueue();
     drainQueue();
   };
 
-  const columns = Math.max(40, process.stdout.columns ?? 80);
-  const divider = "─".repeat(Math.max(12, columns - 2));
+  const columns = Math.max(20, process.stdout.columns ?? 80);
   const headerBorderColor = HEADER_BORDER_COLOR;
 
   const title = "*rawdog*";
-  const topDashes = Math.max(3, columns - 5 - title.length);
-  const bottomLine = "╰" + "─".repeat(columns - 2) + "╯";
   const modelText = `${provider.name}:${provider.model}`;
   const home = homedir();
   const rawCwd = process.cwd();
@@ -1300,36 +1971,29 @@ function App({
       : rawCwd
   ).toLowerCase();
 
-  const BorderRow = ({ children }: { children: React.ReactNode }) => (
-    <Box>
-      <Text color={headerBorderColor}>│ </Text>
-      <Box flexGrow={1} justifyContent="center">
-        {children}
-      </Box>
-      <Text color={headerBorderColor}> │</Text>
-    </Box>
-  );
+  // Header uses ink's native borderStyle so the box auto-sizes to its content.
+  // Welcome text wraps at a readable cap rather than stretching to the terminal
+  // width — that way the committed scrollback line length isn't baked in, and
+  // the box looks the same whether the pane is 40 or 200 cols wide.
+  const welcomeWrap = Math.max(20, Math.min(72, columns - 6));
 
   const renderHeader = () => (
-    <Box key="header" flexDirection="column" width={columns}>
-      <Box>
-        <Text color={headerBorderColor}>╭─ </Text>
+    <Box key="header" flexDirection="column">
+      <Box
+        borderStyle="round"
+        borderColor={headerBorderColor}
+        flexDirection="column"
+        paddingX={2}
+      >
         <GradientText text={title} />
-        <Text color={headerBorderColor}>
-          {" " + "─".repeat(topDashes) + "╮"}
-        </Text>
+        <Box height={1} />
+        {wrapText(welcome, welcomeWrap).map((line, i) => (
+          <Text key={`welcome-${i}`} bold color="white">{line}</Text>
+        ))}
+        <Box height={1} />
+        <Text color="gray">{modelText}</Text>
+        <Text color="gray">{cwdText}</Text>
       </Box>
-      <BorderRow><Text> </Text></BorderRow>
-      {wrapText(welcome, Math.max(10, columns - 8)).map((line, i) => (
-        <BorderRow key={`welcome-${i}`}>
-          <Text bold color="white">{line}</Text>
-        </BorderRow>
-      ))}
-      <BorderRow><Text> </Text></BorderRow>
-      <BorderRow><Text color="gray">{modelText}</Text></BorderRow>
-      <BorderRow><Text color="gray">{cwdText}</Text></BorderRow>
-      <BorderRow><Text> </Text></BorderRow>
-      <Text color={headerBorderColor}>{bottomLine}</Text>
       <Text> </Text>
     </Box>
   );
@@ -1352,6 +2016,7 @@ function App({
         const q = input.slice(1).toLowerCase();
         const all = [
           ...BUILTIN_COMMANDS,
+          ...skills.map((s) => ({ name: "/" + s.name, desc: `[skill] ${s.description}` })),
           ...customCommands.map((c) => ({ name: "/" + c.name, desc: c.description })),
         ];
         const matches = all
@@ -1397,23 +2062,137 @@ function App({
                 {" "}
                 ({Math.max(0, Math.floor(((turnStart ? now - turnStart : 0)) / 1000))}s
                 {status ? ` · ${status}` : ""}
-                {queuedCount > 0 ? ` · queued ${queuedCount}` : ""})
+                {queued.length > 0 ? ` · queued ${queued.length}` : ""})
               </Text>
             </Box>
           </>
         )}
-        <Text> </Text>
-        <Text color="gray">{divider}</Text>
-        <Box>
+        {queued.length === 0 && <Text> </Text>}
+        {queued.map((q, i) => {
+          const prefix = "› ";
+          const full = prefix + q.displayText;
+          const lines = wrapText(full, Math.max(10, columns - 1));
+          return (
+            <Box key={`q-${i}`} flexDirection="column">
+              {lines.map((line, j) => {
+                const body = j === 0 ? line.slice(prefix.length) : line;
+                return (
+                  <Text key={j} backgroundColor="#202020">
+                    {j === 0 ? <Text color="cyan">{prefix}</Text> : null}
+                    <Text color="gray" dimColor>
+                      {body}
+                    </Text>
+                  </Text>
+                );
+              })}
+            </Box>
+          );
+        })}
+        <Box
+          borderStyle="single"
+          borderColor="gray"
+          borderTop={true}
+          borderBottom={true}
+          borderLeft={false}
+          borderRight={false}
+        >
           <Box width={2}>
             <Text bold color="gray">
               {"›"}
             </Text>
           </Box>
-          <TextInput value={input} onChange={setInput} onSubmit={submit} />
+          <TextInput
+            value={input}
+            onChange={setInput}
+            onSubmit={submit}
+            focus={!agentsPanel}
+            placeholder={
+              queued.length > 0 ? "Press up to edit queued messages" : undefined
+            }
+          />
         </Box>
-        <Text color="gray">{divider}</Text>
-        {slashMatches ? (() => {
+        {agentsPanel ? (
+          <Box flexDirection="column" paddingX={1}>
+            <Box>
+              <Text bold color={PINK}>Agents</Text>
+              <Text color="gray">  ({agentsDir(process.cwd())})</Text>
+            </Box>
+            <Text> </Text>
+            {agentsPanel.mode === "list" && (() => {
+              const items: { label: string; desc: string }[] = [
+                { label: "+ Create new agent", desc: "" },
+                ...agentsList.map((a) => ({ label: a.name, desc: a.description })),
+              ];
+              const nameWidth = Math.max(...items.map((i) => i.label.length)) + 2;
+              return (
+                <Box flexDirection="column">
+                  {items.map((it, i) => {
+                    const sel = i === agentsPanel.selected;
+                    return (
+                      <Box key={i}>
+                        <Box width={2}>
+                          <Text color={sel ? PINK : "gray"}>{sel ? "›" : " "}</Text>
+                        </Box>
+                        <Box width={nameWidth}>
+                          <Text color={sel ? PINK : undefined} bold={sel}>
+                            {it.label}
+                          </Text>
+                        </Box>
+                        <Text color="gray">{it.desc}</Text>
+                      </Box>
+                    );
+                  })}
+                </Box>
+              );
+            })()}
+            {agentsPanel.mode === "actions" && (
+              <Box flexDirection="column">
+                <Box>
+                  <Text color="gray">agent: </Text>
+                  <Text color={PINK}>{agentsPanel.agentName}</Text>
+                </Box>
+                <Text> </Text>
+                {(["show", "spawn", "remove", "back"] as const).map((act, i) => {
+                  const sel = i === agentsPanel.selected;
+                  const desc =
+                    act === "show" ? "print file contents" :
+                    act === "spawn" ? "fill input with spawn template" :
+                    act === "remove" ? "delete the .md file" :
+                    "return to list";
+                  return (
+                    <Box key={act}>
+                      <Box width={2}>
+                        <Text color={sel ? PINK : "gray"}>{sel ? "›" : " "}</Text>
+                      </Box>
+                      <Box width={10}>
+                        <Text color={sel ? PINK : undefined} bold={sel}>{act}</Text>
+                      </Box>
+                      <Text color="gray">{desc}</Text>
+                    </Box>
+                  );
+                })}
+              </Box>
+            )}
+            {agentsPanel.mode === "create" && (
+              <Box flexDirection="column">
+                <Text color="gray">name the new agent ([a-z0-9_-]+):</Text>
+                <Box>
+                  <Box width={2}>
+                    <Text color={PINK}>›</Text>
+                  </Box>
+                  <Text>{agentsPanel.buffer}</Text>
+                  <Text inverse> </Text>
+                </Box>
+              </Box>
+            )}
+            <Text> </Text>
+            <Text color="gray" dimColor>
+              {agentsPanel.mode === "create"
+                ? "type name · Enter confirm · Esc cancel"
+                : "↑↓ navigate · Enter select · Esc close"}
+            </Text>
+          </Box>
+        ) : slashMatches ? (() => {
           const nameWidth = Math.max(...slashMatches.map((m) => m.name.length)) + 2;
           return (
             <Box flexDirection="column" paddingLeft={2}>
@@ -1429,7 +2208,7 @@ function App({
           );
         })() : (
           <Box flexDirection="column" paddingX={1}>
-            <Text color="gray">{formatComposerMeta(provider, usage)}</Text>
+            <ComposerMeta provider={provider} usage={usage} />
           </Box>
         )}
         <Text> </Text>
@@ -1439,11 +2218,52 @@ function App({
 }
 
 (async () => {
+  // `rawdog login [provider]` — render setup, save, exit.
+  if (loginSubcommand) {
+    if (!process.stdin.isTTY) {
+      process.stderr.write("rawdog login: needs a TTY (not a pipe/redirect)\n");
+      process.exit(1);
+    }
+    try {
+      await renderSetup(loginSubcommand === "pick" ? undefined : loginSubcommand);
+      process.exit(0);
+    } catch {
+      process.exit(1);
+    }
+  }
+
+  // Pick a provider. If no key + interactive, drop into setup and retry.
+  let initialProvider: Provider;
+  try {
+    initialProvider = pickProvider(pickOptions);
+  } catch (e: any) {
+    if (forceHeadless) {
+      process.stderr.write(`\nrawdog: ${e.message}\n`);
+      process.stderr.write(
+        `\nRun \`rawdog login\` from an interactive terminal,\n` +
+          `or set OPENAI_API_KEY / ANTHROPIC_API_KEY in your shell.\n\n`,
+      );
+      process.exit(1);
+    }
+    try {
+      await renderSetup();
+    } catch {
+      process.exit(1);
+    }
+    try {
+      initialProvider = pickProvider(pickOptions);
+    } catch (e2: any) {
+      process.stderr.write(`\nrawdog: ${e2.message}\n`);
+      process.exit(1);
+    }
+  }
+
   if (forceHeadless) {
     await runHeadless(initialProvider, cliArgs);
     return;
   }
   const customCommands = loadCommands(process.cwd());
+  const skills = loadSkills(process.cwd());
   const mcp = await startMcp(process.cwd());
   for (const info of mcp.serverInfo) {
     if (info.error) {
@@ -1456,6 +2276,7 @@ function App({
       initialPrompt={cliArgs.prompt || undefined}
       resumeId={cliArgs.resumeId}
       customCommands={customCommands}
+      initialSkills={skills}
       mcp={mcp}
     />,
   );

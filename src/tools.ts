@@ -1,9 +1,11 @@
-import { readFile, writeFile, mkdir, appendFile, stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile, writeFile, mkdir, appendFile, stat, readdir } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import type { ToolDef } from "./providers/types.ts";
 import { pickProvider } from "./providers.ts";
 import { listSessions, readSession, searchSessions, findProjectRoot } from "./sessions.ts";
+import { loadAgent } from "./agents.ts";
 
 const SUBAGENT_SYSTEM =
   "You are a focused subagent. Complete the given task concisely and return a summary of findings. You have the same tools as the parent.";
@@ -233,17 +235,18 @@ export const tools: { def: ToolDef; run: ToolHandler }[] = [
   {
     def: {
       name: "spawn_agent",
-      description: "Delegate a focused task to a fresh subagent with its own conversation context. Returns the subagent's final text response. Use for heavy exploration, codebase research, or any work where you don't want intermediate tool results polluting your context.",
+      description: "Delegate a focused task to a fresh subagent with its own conversation context. Returns the subagent's final text response. Use for heavy exploration, codebase research, or any work where you don't want intermediate tool results polluting your context. Pass `name` to load a persistent named subagent from .rawdog/agents/<name>.md (its frontmatter supplies system prompt, tool allowlist, and optional model).",
       input_schema: {
         type: "object",
         properties: {
           task: { type: "string", description: "The task for the subagent" },
-          system: { type: "string", description: "Optional override system prompt" },
+          system: { type: "string", description: "Optional override system prompt (ignored if `name` is set)" },
+          name: { type: "string", description: "Optional name of a persistent subagent defined in .rawdog/agents/" },
         },
         required: ["task"],
       },
     },
-    run: async ({ task, system }) => {
+    run: async ({ task, system, name }) => {
       const MAX_DEPTH = 3;
       const depth = Number(process.env.RAWDOG_SUBAGENT_DEPTH || "0");
       if (depth >= MAX_DEPTH) {
@@ -252,10 +255,27 @@ export const tools: { def: ToolDef; run: ToolHandler }[] = [
       const prev = process.env.RAWDOG_SUBAGENT_DEPTH;
       process.env.RAWDOG_SUBAGENT_DEPTH = String(depth + 1);
       try {
-        const provider = pickProvider();
+        let sys = typeof system === "string" && system ? system : SUBAGENT_SYSTEM;
+        let disabledTools: string[] | undefined;
+        let provider;
+        if (typeof name === "string" && name) {
+          const agent = loadAgent(process.cwd(), String(name));
+          if (!agent) return `error: no subagent named '${name}' in .rawdog/agents/`;
+          sys = agent.system;
+          if (agent.tools) {
+            const allowed = new Set(agent.tools);
+            disabledTools = toolDefs.filter((d) => !allowed.has(d.name)).map((d) => d.name);
+          }
+          try {
+            provider = agent.model ? pickProvider({ model: agent.model }) : pickProvider();
+          } catch (e: any) {
+            return `error: failed to init provider for model '${agent.model}': ${e.message}`;
+          }
+        } else {
+          provider = pickProvider();
+        }
         const { createAgent } = await import("./agent.ts");
-        const sys = typeof system === "string" && system ? system : SUBAGENT_SYSTEM;
-        const sub = createAgent(provider, sys);
+        const sub = createAgent(provider, sys, { disabledTools });
         let buf = "";
         for await (const ev of sub.send(String(task))) {
           if (ev.type === "text") buf += ev.text;
@@ -600,6 +620,79 @@ tools.push({
         const n = items.length;
         await save([]);
         return `cleared ${n} items`;
+      }
+      return `error: unknown action ${act}`;
+    } catch (e: any) {
+      return `error: ${e.message}`;
+    }
+  },
+});
+
+// rawdog's install dir — resolved from this file's URL so `bun link`'d copies
+// still find their bundled docs regardless of cwd.
+export const RAWDOG_INSTALL_DIR = resolve(fileURLToPath(import.meta.url), "../..");
+export const RAWDOG_DOCS_DIR = join(RAWDOG_INSTALL_DIR, "docs");
+
+async function listDocFiles(): Promise<string[]> {
+  try {
+    const entries = await readdir(RAWDOG_DOCS_DIR);
+    return entries.filter((e) => e.endsWith(".md")).sort();
+  } catch {
+    return [];
+  }
+}
+
+function resolveDocName(name: string): string {
+  const base = name.endsWith(".md") ? name : name + ".md";
+  // prevent path traversal — docs must live directly under the docs dir
+  return join(RAWDOG_DOCS_DIR, base.replace(/[\\/]/g, ""));
+}
+
+tools.push({
+  def: {
+    name: "docs",
+    description:
+      "Read rawdog's own bundled documentation. Use this to answer 'what can rawdog do?' questions authoritatively instead of guessing. Actions: 'list' (every doc file with a one-line preview), 'read' (full file by name like 'tools' or 'tools.md'). Docs live at <install-dir>/docs/*.md and are the source of truth for rawdog's features.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "read"], description: "Which docs operation" },
+        name: { type: "string", description: "Doc filename (with or without .md). Required for 'read'." },
+      },
+      required: ["action"],
+    },
+  },
+  run: async ({ action, name }) => {
+    try {
+      const act = String(action);
+      if (act === "list") {
+        const files = await listDocFiles();
+        if (files.length === 0) return `(no docs at ${RAWDOG_DOCS_DIR})`;
+        const lines: string[] = [];
+        for (const f of files) {
+          try {
+            const body = await readFile(join(RAWDOG_DOCS_DIR, f), "utf8");
+            const firstHeading = body.split("\n").find((l) => l.startsWith("# "))?.replace(/^#\s+/, "") ?? "";
+            lines.push(`${f}\t${firstHeading}`);
+          } catch {
+            lines.push(f);
+          }
+        }
+        return lines.join("\n");
+      }
+      if (act === "read") {
+        if (!name) return "error: 'name' required for read";
+        const path = resolveDocName(String(name));
+        try {
+          const body = await readFile(path, "utf8");
+          return body.slice(0, 50_000);
+        } catch (e: any) {
+          if (e.code === "ENOENT") {
+            const files = await listDocFiles();
+            return `error: no doc '${name}'. available: ${files.join(", ") || "(none)"}`;
+          }
+          throw e;
+        }
       }
       return `error: unknown action ${act}`;
     } catch (e: any) {
