@@ -1,20 +1,24 @@
 import OpenAI from "openai";
 import type { Message, Provider, StreamEvent, ToolDef } from "./types.ts";
+import { withRetry } from "../retry.ts";
 
 export class OpenAIProvider implements Provider {
   name = "openai";
   model: string;
   private client: OpenAI;
+  private sessionId: string;
 
   constructor(model = process.env.OPENAI_MODEL || "gpt-4.1") {
     this.model = model;
     this.client = new OpenAI();
+    this.sessionId = crypto.randomUUID();
   }
 
   async *stream(opts: {
     system: string;
     messages: Message[];
     tools: ToolDef[];
+    signal?: AbortSignal;
   }): AsyncIterable<StreamEvent> {
     const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
       { role: "system", content: opts.system },
@@ -30,20 +34,30 @@ export class OpenAIProvider implements Provider {
       },
     }));
 
-    const stream = await this.client.chat.completions.create({
+    // `prompt_cache_key` isn't in the SDK types yet; keep a narrow cast on the
+    // params object only, not on the returned stream.
+    const params = {
       model: this.model,
       messages,
       tools: tools.length ? tools : undefined,
       stream: true,
       stream_options: { include_usage: true },
-    });
+      prompt_cache_key: this.sessionId,
+      user: `rawdog-${this.sessionId}`,
+    } as OpenAI.Chat.ChatCompletionCreateParamsStreaming & {
+      prompt_cache_key?: string;
+    };
+    const stream = await withRetry(() =>
+      this.client.chat.completions.create(params, { signal: opts.signal }),
+    );
 
     // Accumulate tool call args across deltas (OpenAI streams JSON in fragments)
     const pending: Record<number, { id: string; name: string; args: string }> = {};
     let stopReason = "end_turn";
-    let usage: { input: number; output: number } | undefined;
+    let usage: { input: number; output: number; cacheRead?: number } | undefined;
 
     for await (const chunk of stream) {
+      if (opts.signal?.aborted) break;
       const choice = chunk.choices[0];
       if (choice?.delta?.content) {
         yield { type: "text_delta", text: choice.delta.content };
@@ -61,17 +75,26 @@ export class OpenAIProvider implements Provider {
         stopReason = choice.finish_reason === "tool_calls" ? "tool_use" : choice.finish_reason;
       }
       if (chunk.usage) {
-        usage = { input: chunk.usage.prompt_tokens, output: chunk.usage.completion_tokens };
+        usage = {
+          input: chunk.usage.prompt_tokens,
+          output: chunk.usage.completion_tokens,
+          cacheRead: chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
+        };
       }
     }
 
     for (const idx of Object.keys(pending).map(Number).sort((a, b) => a - b)) {
-      const p = pending[idx];
+      const p = pending[idx]!;
       let input: Record<string, unknown> = {};
-      try {
-        input = p.args ? JSON.parse(p.args) : {};
-      } catch {
-        input = { _raw: p.args };
+      if (p.args) {
+        try {
+          input = JSON.parse(p.args);
+        } catch (e: any) {
+          // Surface the parse failure as a tool-call with an error marker so
+          // the agent can report it back to the model, rather than silently
+          // passing {_raw: ...} which tools can't use.
+          input = { __parse_error: e.message, __raw: p.args };
+        }
       }
       yield { type: "tool_call", call: { id: p.id, name: p.name, input } };
     }
@@ -102,16 +125,31 @@ function toOpenAIMessages(messages: Message[]): OpenAI.Chat.ChatCompletionMessag
           : undefined,
       });
     } else if (m.role === "user" || m.role === "tool") {
+      // Tool results must go as their own `role: "tool"` messages. Gather
+      // text+image blocks into a single multimodal user message.
+      const userParts: OpenAI.Chat.ChatCompletionContentPart[] = [];
       for (const block of m.content) {
         if (block.type === "tool_result") {
+          if (userParts.length) {
+            out.push({ role: "user", content: [...userParts] });
+            userParts.length = 0;
+          }
           out.push({
             role: "tool",
             tool_call_id: block.tool_use_id,
             content: block.content,
           });
         } else if (block.type === "text") {
-          out.push({ role: "user", content: block.text });
+          userParts.push({ type: "text", text: block.text });
+        } else if (block.type === "image") {
+          userParts.push({
+            type: "image_url",
+            image_url: { url: `data:${block.mediaType};base64,${block.data}` },
+          });
         }
+      }
+      if (userParts.length) {
+        out.push({ role: "user", content: userParts });
       }
     }
   }

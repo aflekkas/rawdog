@@ -3,3 +3,6 @@ bun.lockb
 .env
 .env.local
 *.log
+
+# ignore all projects
+projects
