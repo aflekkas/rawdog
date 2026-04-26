@@ -1,10 +1,6 @@
 # 🐕 rawdog
 
-> The AI CLI that does whatever it wants
-
-[![My Skills](https://skillicons.dev/icons?i=ts,bun,react)](https://skillicons.dev)
-
-A fully hackable terminal coding agent. Skills, subagents, hooks, MCP, slash commands, all the parts of a modern AI CLI in a single binary you own. Bring your own keys.
+Most AI CLIs ship with a permission system, an approval flow, a bash denylist, a sandbox, an opinion about what the model is allowed to do on your machine. rawdog ships with none of that. Every tool the model picks runs immediately, every bash command executes, every file edit lands, every MCP server you wire in is fair game from the first turn. Skills, subagents, hooks, MCP, slash commands, the full surface of a modern AI CLI in a single binary you compile yourself, no seatbelts and no chrome. Bring your own keys, talk to OpenAI or Anthropic, switch mid-session.
 
 ## 📚 Docs
 
