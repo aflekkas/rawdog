@@ -5,7 +5,7 @@
     "": {
       "name": "rawdog",
       "dependencies": {
-        "@aflekkas/vibecli": "^0.0.1",
+        "@aflekkas/vibecli": "0.0.5",
         "@ai-sdk/anthropic": "^3.0.71",
         "@ai-sdk/openai": "^3.0.53",
         "ai": "^6.0.168",
@@ -22,7 +22,7 @@
     },
   },
   "packages": {
-    "@aflekkas/vibecli": ["@aflekkas/vibecli@0.0.1", "", { "peerDependencies": { "@ai-sdk/anthropic": "^3.0.71", "@ai-sdk/openai": "^3.0.53", "ai": "^6.0.168", "ink": "^5.0.1", "react": "^18.3.1" } }, "sha512-Axzd+pfUh4J0VFXePLZdLQkWdZs5/1jeJZrfK+hJHTTchHUDZaRfJtNorYipq7dz07PK83tvv4gLqMGZeChWBg=="],
+    "@aflekkas/vibecli": ["@aflekkas/vibecli@0.0.5", "", { "peerDependencies": { "@ai-sdk/anthropic": "^3.0.71", "@ai-sdk/openai": "^3.0.53", "ai": "^6.0.168", "ink": "^5.0.1", "react": "^18.3.1" }, "bin": { "vibecli": "bin/vibecli.js" } }, "sha512-GuarMltTz+IJs6iR9vCgGjblQqBmGE3nj3LiVcEGOlGyk+Xd+AXcJzLXdM31VukKtmkFWiRQjNwfaqSd4Q61zA=="],
 
     "@ai-sdk/anthropic": ["@ai-sdk/anthropic@3.0.71", "", { "dependencies": { "@ai-sdk/provider": "3.0.8", "@ai-sdk/provider-utils": "4.0.23" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-bUWOzrzR0gJKJO/PLGMR4uH2dqEgqGhrsCV+sSpk4KtOEnUQlfjZI/F7BFlqSvVpFbjdgYRRLysAeEZpJ6S1lg=="],
 
