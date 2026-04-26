@@ -12,6 +12,7 @@
     "build": "mkdir -p bin && bun build --compile --minify --target=bun src/index.tsx --outfile bin/rawdog"
   },
   "dependencies": {
+    "@aflekkas/vibecli": "^0.0.1",
     "@ai-sdk/anthropic": "^3.0.71",
     "@ai-sdk/openai": "^3.0.53",
     "ai": "^6.0.168",

@@ -1,4 +1,4 @@
-import type { ContentBlock, Message, Provider, ToolDef } from "./providers/types.ts";
+import type { ContentBlock, Message, Provider, ToolDef } from "@aflekkas/vibecli/providers";
 import { toolDefs as baseToolDefs, toolMap as baseToolMap } from "./tools.ts";
 import { estimateContextWindow } from "./providers.ts";
 import { runHook } from "./hooks.ts";

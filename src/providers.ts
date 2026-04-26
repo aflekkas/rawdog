@@ -1,4 +1,4 @@
-import type { Provider } from "./providers/types.ts";
+import type { Provider } from "@aflekkas/vibecli/providers";
 import { OpenAIProvider } from "./providers/openai.ts";
 import { AnthropicProvider } from "./providers/anthropic.ts";
 

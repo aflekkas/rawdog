@@ -2,26 +2,41 @@
 
 ## Module map
 
+Rawdog is a single-package CLI. Generic Ink + AI SDK primitives live in a separate repo, [`vibecli`](https://github.com/aflekkas/vibecli) at `~/Documents/Projects/vibecli/`, and are consumed via the `vibecli` npm package. Paths below are relative to this repo's root.
+
+### `src/` (rawdog-specific)
+
 | File | Role |
 |---|---|
-| `src/index.tsx` | Ink TUI, CLI entrypoint, slash-command dispatcher, system-prompt builder, pricing table |
-| `src/agent.ts` | Tool-use loop, streaming, truncation, auto-compact, hook firing |
-| `src/providers.ts` | `pickProvider()`, `parseProviderSpec()`, context-window estimator |
-| `src/providers/types.ts` | `Provider` interface, `Message`, `ContentBlock`, `ToolDef` |
-| `src/providers/openai.ts` | OpenAI chat completions + tool-call adapter |
-| `src/providers/anthropic.ts` | Anthropic messages + prompt caching |
-| `src/tools.ts` | All built-in tool definitions and handlers |
-| `src/retry.ts` | Retry wrapper for the initial non-stream provider call |
-| `src/sessions.ts` | JSONL transcript read/write, `findProjectRoot()`, list/read/search |
-| `src/config.ts` | `.rawdog/config.json` loader |
-| `src/hooks.ts` | Lifecycle hook runner |
-| `src/commands.ts` | Custom slash command loader |
-| `src/mcp.ts` | MCP stdio client |
-| `src/clipboard.ts` | Image paste / drag-drop helpers |
-| `src/highlight.ts` | Terminal syntax highlighting |
-| `src/text-input.tsx` | Ink text-input widget |
-| `src/ui.tsx` | Shared Ink components |
-| `src/welcome.ts` | Randomized welcome banner lines |
+| `index.tsx` | Ink TUI, CLI entrypoint, slash-command dispatcher, system-prompt builder, pricing table |
+| `agent.ts` | Tool-use loop, streaming, truncation, auto-compact, hook firing |
+| `providers.ts` | `pickProvider()`, `parseProviderSpec()`, context-window estimator |
+| `providers/openai.ts` | OpenAI provider (extends `@aflekkas/vibecli/providers/adapter`) |
+| `providers/anthropic.ts` | Anthropic provider (extends `@aflekkas/vibecli/providers/adapter`) |
+| `tools.ts` | All built-in tool definitions and handlers |
+| `sessions.ts` | JSONL transcript read/write, `findProjectRoot()`, list/read/search |
+| `config.ts` | `.rawdog/config.json` loader |
+| `hooks.ts` | Lifecycle hook runner |
+| `commands.ts` | Custom slash command loader |
+| `agents.ts` | Custom subagent loader |
+| `skills.ts` | Skills loader |
+| `mcp.ts` | MCP stdio client |
+| `setup.ts`, `setup-ui.tsx` | First-run API-key setup flow |
+| `welcome.ts` | Randomized welcome banner lines |
+
+### `vibecli` (separate repo, consumed as a package)
+
+| Subpath | Role |
+|---|---|
+| `@aflekkas/vibecli/text-input` | Ink text-input widget (cursor, paste, undo) |
+| `@aflekkas/vibecli/clipboard` | Image paste / drag-drop helpers |
+| `@aflekkas/vibecli/highlight` | Terminal syntax highlighting |
+| `@aflekkas/vibecli/ui` | Shared Ink components (color math, wrap, gradient text) |
+| `@aflekkas/vibecli/retry` | Exponential-backoff retry wrapper |
+| `@aflekkas/vibecli/providers` | `Provider` interface, `Message`, `ContentBlock`, `ToolDef` |
+| `@aflekkas/vibecli/providers/adapter` | Vercel AI SDK adapter (`AiSdkProvider`) |
+
+Imported as e.g., `import { TextInput } from "@aflekkas/vibecli/text-input"`. Currently `bun link`'d to `~/Documents/Projects/vibecli/` for local development; once published to npm, this repo will pin a version.
 
 ## Per-turn data flow
 

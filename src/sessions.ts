@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, appendFileSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { Message } from "./providers/types.ts";
+import type { Message } from "@aflekkas/vibecli/providers";
 
 // Walk from cwd up toward / looking for an existing .rawdog/ dir. Fall back
 // to cwd if none is found — the session machinery auto-creates it.

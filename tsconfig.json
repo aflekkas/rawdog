@@ -13,7 +13,7 @@
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
     "noEmit": true,
-    "types": ["bun-types", "react"]
+    "types": ["bun", "react"]
   },
   "include": ["src/**/*"]
 }

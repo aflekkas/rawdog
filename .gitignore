@@ -6,3 +6,7 @@ bun.lockb
 
 # ignore all projects
 projects
+
+# Local agent instructions, not meant for the public repo
+AGENTS.md
+CLAUDE.md

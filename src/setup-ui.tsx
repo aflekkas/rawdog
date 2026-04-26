@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
-import { GradientText } from "./ui.tsx";
+import { GradientText } from "@aflekkas/vibecli/ui";
 import { writeUserEnv, userEnvPath } from "./setup.ts";
 
 type Provider = "openai" | "anthropic";

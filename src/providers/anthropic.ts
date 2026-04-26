@@ -1,5 +1,5 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
-import { AiSdkProvider } from "./adapter.ts";
+import { AiSdkProvider } from "@aflekkas/vibecli/providers/adapter";
 
 export class AnthropicProvider extends AiSdkProvider {
   constructor(model = process.env.ANTHROPIC_MODEL || "claude-opus-4-7") {

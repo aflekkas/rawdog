@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { render, Box, Static, Text, useApp, useInput } from "ink";
 import { spawnSync } from "node:child_process";
-import { TextInput } from "./text-input.tsx";
+import { TextInput } from "@aflekkas/vibecli/text-input";
 import { readFileSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, basename } from "node:path";
@@ -10,9 +10,9 @@ import { fileURLToPath } from "node:url";
 import { createAgent } from "./agent.ts";
 import type { TurnUsage } from "./agent.ts";
 import { toolDefs as baseToolDefs } from "./tools.ts";
-import type { ContentBlock, Provider } from "./providers/types.ts";
+import type { ContentBlock, Provider } from "@aflekkas/vibecli/providers";
 import { pickProvider, parseProviderSpec, estimateContextWindow, type PickOptions } from "./providers.ts";
-import { GradientText, wrapText } from "./ui.tsx";
+import { GradientText, wrapText } from "@aflekkas/vibecli/ui";
 import { pickWelcome } from "./welcome.ts";
 import {
   startSession,
@@ -25,7 +25,7 @@ import {
   extractImagePaths,
   readClipboardImage,
   readImageFile,
-} from "./clipboard.ts";
+} from "@aflekkas/vibecli/clipboard";
 import { loadConfig, configPath } from "./config.ts";
 import { SetupScreen } from "./setup-ui.tsx";
 import { userEnvPath } from "./setup.ts";
@@ -41,7 +41,7 @@ import {
 } from "./skills.ts";
 import { loadAgents, loadAgent, agentsDir, isValidAgentName, type SubAgent } from "./agents.ts";
 import { startMcp, type McpSession } from "./mcp.ts";
-import { highlight } from "./highlight.ts";
+import { highlight } from "@aflekkas/vibecli/highlight";
 
 // Bun auto-loads .env from cwd. When rawdog is run from elsewhere, also check
 // ~/.config/rawdog/.env, ~/.rawdog/.env, and the install dir's .env.
@@ -96,7 +96,7 @@ You render in a terminal TUI. Keep your text tight. No preamble, no filler, no "
 
 When pointing at specific code, use \`path/to/file.ts:42\` so the user can jump to it. Markdown renders, but skip emojis unless the user asked. Don't narrate internal reasoning to the user — user-facing text is for relevant communication, not stream-of-consciousness.
 
-Only your text output is shown to the user. Don't use bash \`echo\`, code comments, or file writes as a way to communicate — those channels are invisible and wasted.
+Only your text output is shown to the user. Tool calls and tool results are NOT visible to them — they see your message before the tool call, and your message after, nothing in between. So when a tool returns content the user actually wants (a sessions list, a search result, a file's contents, a grep match), you MUST relay the substance in your next text reply. Do not say "here's the list" and stop — they see no list. Summarize, paste the relevant lines, or otherwise put the answer in chat. Same goes for bash \`echo\`, code comments, and file writes — invisible channels, wasted bytes.
 
 Don't give time estimates. Just do the work.
 
@@ -651,6 +651,9 @@ function App({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [welcome, setWelcome] = useState<string>(() => pickWelcome());
   const [clearEpoch, setClearEpoch] = useState(0);
+  const [columnsState, setColumnsState] = useState<number>(
+    () => Math.max(20, process.stdout.columns ?? 80),
+  );
   type AgentsPanel =
     | { mode: "list"; selected: number }
     | { mode: "actions"; agentName: string; selected: number }
@@ -665,6 +668,32 @@ function App({
   const runningRef = useRef(false);
 
   const syncQueue = () => setQueued([...queueRef.current]);
+
+  const pullQueueIntoInput = () => {
+    if (queueRef.current.length === 0) return;
+    const texts: string[] = [];
+    const imgs: Attachment[] = [];
+    for (const q of queueRef.current) {
+      if (typeof q.payload === "string") {
+        if (q.payload) texts.push(q.payload);
+      } else {
+        for (const b of q.payload) {
+          if (b.type === "text") texts.push(b.text);
+          else if (b.type === "image") {
+            imgs.push({
+              label: `queued-${imgs.length + 1}.img`,
+              mediaType: b.mediaType,
+              data: b.data,
+            });
+          }
+        }
+      }
+    }
+    const joined = texts.filter(Boolean).join("\n\n");
+    setInput((prev) => (prev ? prev + "\n\n" + joined : joined));
+    if (imgs.length) setAttachments((a) => [...a, ...imgs]);
+    clearQueue();
+  };
 
   const mergeQueued = (items: QueueItem[]): QueueItem => {
     const displayText = items.map((i) => i.displayText).join("\n\n");
@@ -774,6 +803,25 @@ function App({
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [busy]);
+
+  // Terminal resize (incl. cmd+/cmd-) fires SIGWINCH. Update columns and bump
+  // clearEpoch so <Static> remounts and re-prints header + entries at the new
+  // width — without remount, committed scrollback stays at the old column
+  // count and `─` borders wrap into broken segments.
+  useEffect(() => {
+    const onResize = () => {
+      const next = Math.max(20, process.stdout.columns ?? 80);
+      setColumnsState((prev) => {
+        if (prev === next) return prev;
+        setClearEpoch((e) => e + 1);
+        return next;
+      });
+    };
+    process.stdout.on("resize", onResize);
+    return () => {
+      process.stdout.off("resize", onResize);
+    };
+  }, []);
 
   useEffect(() => {
     if (!busy) return;
@@ -942,30 +990,6 @@ function App({
         }
         return;
       }
-      return;
-    }
-    if (key.upArrow && input === "" && queueRef.current.length > 0) {
-      const texts: string[] = [];
-      const imgs: Attachment[] = [];
-      for (const q of queueRef.current) {
-        if (typeof q.payload === "string") {
-          if (q.payload) texts.push(q.payload);
-        } else {
-          for (const b of q.payload) {
-            if (b.type === "text") texts.push(b.text);
-            else if (b.type === "image") {
-              imgs.push({
-                label: `queued-${imgs.length + 1}.img`,
-                mediaType: b.mediaType,
-                data: b.data,
-              });
-            }
-          }
-        }
-      }
-      setInput(texts.filter(Boolean).join("\n\n"));
-      if (imgs.length) setAttachments((a) => [...a, ...imgs]);
-      clearQueue();
       return;
     }
     if (key.escape) {
@@ -1957,7 +1981,7 @@ Cover when relevant: one-line project description, key directories, build/test/r
     drainQueue();
   };
 
-  const columns = Math.max(20, process.stdout.columns ?? 80);
+  const columns = columnsState;
   const headerBorderColor = HEADER_BORDER_COLOR;
 
   const title = "*rawdog*";
@@ -1971,11 +1995,11 @@ Cover when relevant: one-line project description, key directories, build/test/r
       : rawCwd
   ).toLowerCase();
 
-  // Header uses ink's native borderStyle so the box auto-sizes to its content.
-  // Welcome text wraps at a readable cap rather than stretching to the terminal
-  // width — that way the committed scrollback line length isn't baked in, and
-  // the box looks the same whether the pane is 40 or 200 cols wide.
-  const welcomeWrap = Math.max(20, Math.min(72, columns - 6));
+  // Header stretches to terminal width so the box hugs the pane edges.
+  // Note: this Box renders inside <Static>, so its border is committed to
+  // scrollback at the column count present at render time — terminal zoom
+  // (which changes columns) won't reflow the committed border.
+  const welcomeWrap = Math.max(20, columns - 6);
 
   const renderHeader = () => (
     <Box key="header" flexDirection="column">
@@ -1984,6 +2008,7 @@ Cover when relevant: one-line project description, key directories, build/test/r
         borderColor={headerBorderColor}
         flexDirection="column"
         paddingX={2}
+        width={columns}
       >
         <GradientText text={title} />
         <Box height={1} />
@@ -2105,6 +2130,7 @@ Cover when relevant: one-line project description, key directories, build/test/r
             value={input}
             onChange={setInput}
             onSubmit={submit}
+            onHistoryPrev={pullQueueIntoInput}
             focus={!agentsPanel}
             placeholder={
               queued.length > 0 ? "Press up to edit queued messages" : undefined
@@ -2280,7 +2306,11 @@ Cover when relevant: one-line project description, key directories, build/test/r
       mcp={mcp}
     />,
   );
-  const shutdown = () => { try { mcp.shutdown(); } catch {} };
+  const shutdown = () => {
+    try { mcp.shutdown(); } catch {}
+    // Disable bracketed paste in case TextInput cleanup didn't run.
+    try { process.stdout.write("\x1b[?2004l"); } catch {}
+  };
   process.on("exit", shutdown);
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir, appendFile, stat, readdir } from "node:fs/p
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
-import type { ToolDef } from "./providers/types.ts";
+import type { ToolDef } from "@aflekkas/vibecli/providers";
 import { pickProvider } from "./providers.ts";
 import { listSessions, readSession, searchSessions, findProjectRoot } from "./sessions.ts";
 import { loadAgent } from "./agents.ts";

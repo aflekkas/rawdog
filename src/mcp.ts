@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FileSink, Subprocess } from "bun";
-import type { ToolDef } from "./providers/types.ts";
+import type { ToolDef } from "@aflekkas/vibecli/providers";
 import { findProjectRoot } from "./sessions.ts";
 
 export type McpTool = {

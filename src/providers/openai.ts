@@ -1,5 +1,5 @@
 import { createOpenAI } from "@ai-sdk/openai";
-import { AiSdkProvider } from "./adapter.ts";
+import { AiSdkProvider } from "@aflekkas/vibecli/providers/adapter";
 
 export class OpenAIProvider extends AiSdkProvider {
   constructor(model = process.env.OPENAI_MODEL || "gpt-4.1") {

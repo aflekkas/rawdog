@@ -7,7 +7,9 @@ Rendered with Ink. Streams provider output line-by-line. Tool calls render as di
 | Key | Effect |
 |---|---|
 | `enter` | Submit |
-| `esc` | Abort the current turn mid-stream |
+| `shift+enter` / `opt+enter` / `\` + `enter` | Insert newline |
+| `up` on first line | Pull queued messages into editor (appended to current input). On non-first lines moves cursor up. |
+| `esc` | Abort the current turn mid-stream, or clear queued messages if none running |
 | `ctrl+c` | Force quit |
 | `ctrl+v` | Paste image from clipboard |
 | Drag-drop image into terminal | Auto-attach the file |
