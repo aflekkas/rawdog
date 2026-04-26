@@ -2,13 +2,17 @@
 
 > The AI CLI that does whatever it wants
 
-## Docs
+[![My Skills](https://skillicons.dev/icons?i=ts,bun,react)](https://skillicons.dev)
+
+A fully hackable terminal coding agent. Skills, subagents, hooks, MCP, slash commands, all the parts of a modern AI CLI in a single binary you own. Bring your own keys.
+
+## 📚 Docs
 
 Full manual lives under [`docs/`](docs/). Start at [`docs/index.md`](docs/index.md). Rawdog ships with a `docs` tool and a `/docs` slash command so the agent can read its own manual without leaving the TUI — the `docs` tool is the source of truth when you ask "what can rawdog do?".
 
 **Contributor rule:** any behavioral change updates the relevant file under `docs/` in the same commit. See [`docs/docs-system.md`](docs/docs-system.md) and `AGENTS.md`.
 
-## Setup
+## 📦 Install
 
 ```bash
 bun install
@@ -34,7 +38,7 @@ Inside the TUI, `/login` prints current key status and the storage path.
 bun run build   # produces bin/rawdog — a compiled binary, no Bun install needed on target
 ```
 
-## Run
+## 🚀 Usage
 
 Interactive TUI from anywhere, once linked:
 
@@ -207,7 +211,7 @@ rawdog has a `sessions` tool (list/read/search), so the model itself can recall 
 
 Add `.rawdog/sessions/` to your `.gitignore` if you don't want chat logs in git.
 
-## Tools
+## 🧰 Tools
 
 Built-in: `bash`, `read`, `write`, `edit`, `grep`, `glob`, `spawn_agent`, `memory`, `sessions`, `webfetch`, `websearch`, `todo`.
 
@@ -215,7 +219,7 @@ MCP tools show up as `mcp__<server>__<name>`.
 
 Disable with `config.tools.disabled: [...]` — names are stripped from `toolDefs` at startup.
 
-## Structure
+## 🏗️ Structure
 
 - `src/index.tsx` — Ink TUI + CLI entrypoint
 - `src/agent.ts` — tool-use loop, truncation, auto-compact, hook firing
@@ -225,7 +229,7 @@ Disable with `config.tools.disabled: [...]` — names are stripped from `toolDef
 - `src/sessions.ts` — JSONL transcript read/write, project-root walker
 - `src/config.ts`, `src/hooks.ts`, `src/commands.ts`, `src/mcp.ts`, `src/highlight.ts`
 
-## Extending
+## 🪝 Extending
 
 Add a tool: push an entry into `tools` in `src/tools.ts`. Schema is JSON Schema.
 
@@ -233,10 +237,14 @@ Add a provider: implement `Provider` in `src/providers/types.ts`, wire into `pic
 
 Add a slash command: push an entry into `BUILTIN_COMMANDS` in `src/index.tsx` and add a handler in `submit()`. Users can also drop custom commands into `.rawdog/commands/*.md` without touching the source.
 
-## Explicitly excluded
+## 🚫 Explicitly excluded
 
 rawdog will NOT grow these, by design. If you open a PR adding one, it gets closed.
 
 - **No permission system, approval flow, bash denylist, or sandbox** — the whole product thesis. If you want seatbelts, use Claude Code or Codex.
 - **No external editor integration** — no `$EDITOR` / vim handoff, no ctrl+x-to-editor, no "open this diff in your IDE." You type into the TUI, or you use `@path` mentions.
 - **No git worktree isolation** — no `/fork`, no worktree spawning, no parallel branch sandboxes. The model has bash; it can `git worktree` itself if you ask. rawdog itself stays minimal.
+
+## 📄 License
+
+MIT
