@@ -1,6 +1,6 @@
 # 🐕 rawdog
 
-> Claude code, but yours
+> Hackable Claude Code in a single binary
 
 ## Docs
 
