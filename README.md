@@ -1,6 +1,6 @@
-# rawdog
+# 🐕 rawdog
 
-minimal TUI agentic harness. Bun + Ink + OpenAI/Anthropic.
+> Claude code, but yours
 
 ## Docs
 
