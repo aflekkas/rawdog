@@ -39,9 +39,10 @@ import {
   skillPath,
   type Skill,
 } from "./skills.ts";
-import { loadAgents, loadAgent, agentsDir, isValidAgentName, type SubAgent } from "./agents.ts";
-import { startMcp, type McpSession } from "./mcp.ts";
+import { loadAgents, loadAgent, agentsDir, isValidAgentName } from "./agents.ts";
+import { startMcp, mcpConfigPath, type McpSession } from "./mcp.ts";
 import { highlight } from "@aflekkas/vibecli/highlight";
+import { Picker, type PickerItem } from "./picker.tsx";
 
 // Bun auto-loads .env from cwd. When rawdog is run from elsewhere, also check
 // ~/.config/rawdog/.env, ~/.rawdog/.env, and the install dir's .env.
@@ -192,28 +193,18 @@ function buildSystem(
   };
 }
 
-// Rough per-million-token pricing (USD). null = unknown model.
-function pricePerMTok(
-  providerName: string,
-  model: string,
-): { input: number; output: number } | null {
-  const m = model.toLowerCase();
-  if (providerName === "anthropic" || m.includes("claude")) {
-    if (m.includes("opus")) return { input: 15, output: 75 };
-    if (m.includes("sonnet")) return { input: 3, output: 15 };
-    if (m.includes("haiku")) return { input: 1, output: 5 };
-    return null;
-  }
-  if (m.startsWith("gpt-5") && m.includes("mini")) return { input: 0.25, output: 2 };
-  if (m.startsWith("gpt-5")) return { input: 1.25, output: 10 };
-  if (m.startsWith("gpt-4.1-mini")) return { input: 0.4, output: 1.6 };
-  if (m.startsWith("gpt-4.1-nano")) return { input: 0.1, output: 0.4 };
-  if (m.startsWith("gpt-4.1")) return { input: 2, output: 8 };
-  if (m.startsWith("gpt-4o-mini")) return { input: 0.15, output: 0.6 };
-  if (m.startsWith("gpt-4o")) return { input: 2.5, output: 10 };
-  if (m.startsWith("o3-mini")) return { input: 1.1, output: 4.4 };
-  if (m.startsWith("o3")) return { input: 2, output: 8 };
-  return null;
+function relativeTime(iso: string): string {
+  const t = Date.parse(iso);
+  if (isNaN(t)) return iso;
+  const diff = Date.now() - t;
+  const min = Math.floor(diff / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d ago`;
+  return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 const HEADER_BORDER_COLOR = "#ff4d9d";
@@ -260,7 +251,7 @@ function parseArgv(argv: string[]): CliArgs {
   return out;
 }
 
-const HELP_TEXT = `\nrawdog — minimal TUI agentic harness\n\nusage:\n  rawdog [options] [prompt...]\n  rawdog login [openai|anthropic]       store API key in ~/.config/rawdog/.env\n  echo "prompt" | rawdog -p\n\noptions:\n  -p, --print            headless mode (read stdin or prompt, stream response, exit)\n  -m, --model <spec>     model spec, e.g. "gpt-5" or "anthropic:claude-opus-4-7"\n  --resume [id]          resume prior session (most recent if id omitted)\n  -h, --help             this message\n\nfirst run with no API key: rawdog drops into an interactive setup screen.\nenv: OPENAI_API_KEY / ANTHROPIC_API_KEY / RAWDOG_PROVIDER\n\nslash commands in TUI:\n  /help /cost /context /sessions /compact /init /clear /new\n  /paste /attach /drop /restart /model /login /resume /todo /agents /docs /exit /quit\n`;
+const HELP_TEXT = `\nrawdog — minimal TUI agentic harness\n\nusage:\n  rawdog [options] [prompt...]\n  rawdog login [openai|anthropic]       store API key in ~/.config/rawdog/.env\n  echo "prompt" | rawdog -p\n\noptions:\n  -p, --print            headless mode (read stdin or prompt, stream response, exit)\n  -m, --model <spec>     model spec, e.g. "gpt-5" or "anthropic:claude-opus-4-7"\n  --resume [id]          resume prior session (most recent if id omitted)\n  -h, --help             this message\n\nfirst run with no API key: rawdog drops into an interactive setup screen.\nenv: OPENAI_API_KEY / ANTHROPIC_API_KEY / RAWDOG_PROVIDER\n\nslash commands in TUI:\n  /help /usage /context /sessions /compact /init /clear /new\n  /paste /attach /drop /restart /model /login /resume /todo /agents /skills /mcp /docs /exit /quit\n`;
 
 const loginSubcommand = process.argv[2] === "login"
   ? (() => {
@@ -516,7 +507,7 @@ type QueueItem = { payload: string | ContentBlock[]; displayText: string };
 
 const BUILTIN_COMMANDS: Array<{ name: string; desc: string }> = [
   { name: "/help", desc: "list commands" },
-  { name: "/cost", desc: "show token usage + estimated spend" },
+  { name: "/usage", desc: "show token totals for this session" },
   { name: "/context", desc: "show context window usage + token breakdown" },
   { name: "/sessions", desc: "list recent session transcripts" },
   { name: "/compact", desc: "summarize history now to free context" },
@@ -527,6 +518,7 @@ const BUILTIN_COMMANDS: Array<{ name: string; desc: string }> = [
   { name: "/todo", desc: "show persistent todo list" },
   { name: "/agents", desc: "list/show/rm named subagents; /agents new <name> builds one" },
   { name: "/skills", desc: "list/show/rm skills; /skills new <name> builds one" },
+  { name: "/mcp", desc: "list MCP servers; /mcp show <name> for tools" },
   { name: "/docs", desc: "list rawdog's bundled docs; /docs <name> to read one" },
   { name: "/clear", desc: "start a new conversation (alias: /new)" },
   { name: "/new", desc: "start a new conversation (alias: /clear)" },
@@ -654,12 +646,17 @@ function App({
   const [columnsState, setColumnsState] = useState<number>(
     () => Math.max(20, process.stdout.columns ?? 80),
   );
-  type AgentsPanel =
-    | { mode: "list"; selected: number }
-    | { mode: "actions"; agentName: string; selected: number }
-    | { mode: "create"; buffer: string };
-  const [agentsPanel, setAgentsPanel] = useState<AgentsPanel | null>(null);
-  const [agentsList, setAgentsList] = useState<SubAgent[]>([]);
+  type PickerState = {
+    title: string;
+    subtitle?: string;
+    items: PickerItem[];
+    selected: number;
+    emptyText?: string;
+    hintFooter?: string;
+    onSelect: (item: PickerItem, index: number) => void;
+  };
+  const [picker, setPicker] = useState<PickerState | null>(null);
+  const [agentsCreate, setAgentsCreate] = useState<{ buffer: string } | null>(null);
   const agentRef = useRef<ReturnType<typeof createAgent> | null>(null);
   const systemRef = useRef<string>(BASE_SYSTEM);
   const loadedCtxRef = useRef<string[]>([]);
@@ -878,117 +875,324 @@ function App({
     drainQueue();
   };
 
+  const openPicker = (state: Omit<PickerState, "selected"> & { selected?: number }) => {
+    setAgentsCreate(null);
+    setPicker({ selected: 0, ...state });
+  };
+
+  const openAgentsPicker = () => {
+    const list = loadAgents(process.cwd());
+    const items: PickerItem[] = [
+      { key: "__new", label: "+ create new agent", description: "" },
+      ...list.map((a) => ({ key: a.name, label: a.name, description: a.description })),
+    ];
+    openPicker({
+      title: "Agents",
+      subtitle: agentsDir(process.cwd()),
+      items,
+      onSelect: (item) => {
+        if (item.key === "__new") {
+          setPicker(null);
+          setAgentsCreate({ buffer: "" });
+          return;
+        }
+        openAgentActions(item.key);
+      },
+    });
+  };
+
+  const openAgentActions = (name: string) => {
+    const actions: PickerItem[] = [
+      { key: "show", label: "show", description: "print file contents" },
+      { key: "spawn", label: "spawn", description: "fill input with spawn template" },
+      { key: "remove", label: "remove", description: "delete the .md file" },
+      { key: "back", label: "back", description: "return to list" },
+    ];
+    openPicker({
+      title: `Agent: ${name}`,
+      items: actions,
+      onSelect: (item) => {
+        const agent = loadAgent(process.cwd(), name);
+        if (item.key === "back" || !agent) {
+          openAgentsPicker();
+          return;
+        }
+        if (item.key === "show") {
+          let raw = "";
+          try {
+            raw = readFileSync(agent.path, "utf8");
+          } catch (e: any) {
+            raw = `(read failed: ${e.message})`;
+          }
+          setPicker(null);
+          setLog((l) => [...l, { kind: "system", text: `${agent.path}\n\n${raw}` }]);
+          return;
+        }
+        if (item.key === "spawn") {
+          setInput(`use the ${agent.name} subagent to `);
+          setPicker(null);
+          return;
+        }
+        if (item.key === "remove") {
+          try {
+            unlinkSync(agent.path);
+            setLog((l) => [...l, { kind: "system", text: `removed ${agent.path}` }]);
+          } catch (e: any) {
+            setLog((l) => [...l, { kind: "system", text: `rm failed: ${e.message}` }]);
+          }
+          openAgentsPicker();
+          return;
+        }
+      },
+    });
+  };
+
+  const openSessionsPicker = (title = "Sessions") => {
+    const rows = listSessions(process.cwd(), 200).filter((r) => r.messages > 0);
+    if (rows.length === 0) {
+      setLog((l) => [
+        ...l,
+        { kind: "system", text: "no sessions with messages in .rawdog/sessions/" },
+      ]);
+      return;
+    }
+    const current = sessionRef.current?.id;
+    const items: PickerItem[] = rows.map((r) => ({
+      key: r.id,
+      label: (r.id === current ? "● " : "  ") + r.title,
+      description: `${r.messages} msg${r.messages === 1 ? "" : "s"} · ${relativeTime(r.startedAt)}`,
+    }));
+    openPicker({
+      title,
+      subtitle: `${rows.length} session${rows.length === 1 ? "" : "s"}`,
+      items,
+      hintFooter: "↑↓ · PgUp/PgDn · Enter resume · Esc close",
+      onSelect: (item) => {
+        const msgs = loadSessionMessages(process.cwd(), item.key);
+        if (!msgs) {
+          setLog((l) => [...l, { kind: "system", text: `no session ${item.key}` }]);
+          setPicker(null);
+          return;
+        }
+        if (agentRef.current) {
+          agentRef.current.state.messages = msgs;
+          setLog((l) => [
+            ...l,
+            { kind: "system", text: `resumed ${item.key} (${msgs.length} messages)` },
+          ]);
+        }
+        setPicker(null);
+      },
+    });
+  };
+
+  const openDocsPicker = async () => {
+    try {
+      const { toolMap } = await import("./tools.ts");
+      const handler = toolMap["docs"];
+      if (!handler) {
+        setLog((l) => [...l, { kind: "system", text: "docs tool not available" }]);
+        return;
+      }
+      const list = await handler({ action: "list" });
+      const lines = String(list).split("\n").filter(Boolean);
+      if (lines.length === 0 || lines[0]!.startsWith("(")) {
+        setLog((l) => [...l, { kind: "system", text: String(list) }]);
+        return;
+      }
+      const items: PickerItem[] = lines.map((line) => {
+        const [file = line, heading = ""] = line.split("\t");
+        return { key: file, label: file.replace(/\.md$/, ""), description: heading };
+      });
+      openPicker({
+        title: "Docs",
+        subtitle: "rawdog manual",
+        items,
+        hintFooter: "↑↓ · PgUp/PgDn · Enter open · Esc close",
+        onSelect: async (item) => {
+          try {
+            const body = await handler({ action: "read", name: item.key });
+            setPicker(null);
+            setLog((l) => [...l, { kind: "system", text: `# ${item.label}\n\n${body}` }]);
+          } catch (e: any) {
+            setLog((l) => [...l, { kind: "system", text: `docs read failed: ${e.message}` }]);
+          }
+        },
+      });
+    } catch (e: any) {
+      setLog((l) => [...l, { kind: "system", text: `docs error: ${e.message}` }]);
+    }
+  };
+
+  const openSkillsPicker = () => {
+    const fresh = loadSkills(process.cwd());
+    setSkills(fresh);
+    const dir = skillsDir(process.cwd(), "project");
+    if (fresh.length === 0) {
+      setLog((l) => [
+        ...l,
+        { kind: "system", text: `no skills in ${dir}\ncreate one: /skills new <name>` },
+      ]);
+      return;
+    }
+    const items: PickerItem[] = fresh.map((s) => ({
+      key: s.name,
+      label: "/" + s.name + (s.source === "user" ? "~" : ""),
+      description: s.description,
+      hint: s.source,
+    }));
+    openPicker({
+      title: "Skills",
+      subtitle: dir,
+      items,
+      hintFooter: "↑↓ · PgUp/PgDn · Enter actions · Esc close",
+      onSelect: (item) => openSkillActions(item.key),
+    });
+  };
+
+  const openSkillActions = (name: string) => {
+    const found = loadSkills(process.cwd()).find((s) => s.name === name);
+    if (!found) {
+      setPicker(null);
+      return;
+    }
+    const isProject = found.source === "project";
+    const actions: PickerItem[] = [
+      { key: "show", label: "show", description: "print file contents" },
+      {
+        key: "rm",
+        label: "remove",
+        description: isProject ? "delete the skill dir" : `user-global; rm manually: ${found.dir}`,
+        disabled: !isProject,
+      },
+      { key: "back", label: "back", description: "return to list" },
+    ];
+    openPicker({
+      title: `Skill: /${found.name}`,
+      items: actions,
+      onSelect: (item) => {
+        if (item.key === "back") {
+          openSkillsPicker();
+          return;
+        }
+        if (item.key === "show") {
+          let raw = "";
+          try {
+            raw = readFileSync(found.path, "utf8");
+          } catch (e: any) {
+            raw = `(read failed: ${e.message})`;
+          }
+          setPicker(null);
+          setLog((l) => [...l, { kind: "system", text: `${found.path}\n\n${raw}` }]);
+          return;
+        }
+        if (item.key === "rm" && isProject) {
+          try {
+            const { rmSync } = require("node:fs");
+            rmSync(found.dir, { recursive: true, force: true });
+            setSkills(loadSkills(process.cwd()));
+            setLog((l) => [...l, { kind: "system", text: `removed ${found.dir}` }]);
+          } catch (e: any) {
+            setLog((l) => [...l, { kind: "system", text: `rm failed: ${e.message}` }]);
+          }
+          openSkillsPicker();
+          return;
+        }
+      },
+    });
+  };
+
   useInput((_input, key) => {
     if (key.ctrl && _input === "c") exit();
-    if (agentsPanel) {
+    if (picker) {
       if (key.escape) {
-        setAgentsPanel(null);
+        setPicker(null);
         return;
       }
-      if (agentsPanel.mode === "list") {
-        const total = agentsList.length + 1;
-        if (key.upArrow) {
-          setAgentsPanel({ mode: "list", selected: Math.max(0, agentsPanel.selected - 1) });
-          return;
-        }
-        if (key.downArrow) {
-          setAgentsPanel({ mode: "list", selected: Math.min(total - 1, agentsPanel.selected + 1) });
-          return;
-        }
-        if (key.return) {
-          if (agentsPanel.selected === 0) {
-            setAgentsPanel({ mode: "create", buffer: "" });
-            return;
-          }
-          const picked = agentsList[agentsPanel.selected - 1];
-          if (picked) setAgentsPanel({ mode: "actions", agentName: picked.name, selected: 0 });
-          return;
-        }
+      const visibleRows = Math.max(4, Math.min(20, (process.stdout.rows ?? 24) - 9));
+      if (key.upArrow) {
+        setPicker({ ...picker, selected: Math.max(0, picker.selected - 1) });
         return;
       }
-      if (agentsPanel.mode === "actions") {
-        const actions = ["show", "spawn", "remove", "back"];
-        if (key.upArrow) {
-          setAgentsPanel({ ...agentsPanel, selected: Math.max(0, agentsPanel.selected - 1) });
-          return;
-        }
-        if (key.downArrow) {
-          setAgentsPanel({
-            ...agentsPanel,
-            selected: Math.min(actions.length - 1, agentsPanel.selected + 1),
-          });
-          return;
-        }
-        if (key.return) {
-          const act = actions[agentsPanel.selected];
-          const agent = loadAgent(process.cwd(), agentsPanel.agentName);
-          if (act === "back" || !agent) {
-            setAgentsPanel({ mode: "list", selected: 0 });
-            return;
-          }
-          if (act === "show") {
-            let raw = "";
-            try {
-              raw = readFileSync(agent.path, "utf8");
-            } catch (e: any) {
-              raw = `(read failed: ${e.message})`;
-            }
-            setLog((l) => [...l, { kind: "system", text: `${agent.path}\n\n${raw}` }]);
-            setAgentsPanel(null);
-            return;
-          }
-          if (act === "spawn") {
-            setInput(`use the ${agent.name} subagent to `);
-            setAgentsPanel(null);
-            return;
-          }
-          if (act === "remove") {
-            try {
-              unlinkSync(agent.path);
-              setLog((l) => [...l, { kind: "system", text: `removed ${agent.path}` }]);
-            } catch (e: any) {
-              setLog((l) => [...l, { kind: "system", text: `rm failed: ${e.message}` }]);
-            }
-            setAgentsList(loadAgents(process.cwd()));
-            setAgentsPanel({ mode: "list", selected: 0 });
-            return;
-          }
-        }
+      if (key.downArrow) {
+        setPicker({
+          ...picker,
+          selected: Math.min(Math.max(0, picker.items.length - 1), picker.selected + 1),
+        });
         return;
       }
-      if (agentsPanel.mode === "create") {
-        if (key.return) {
-          const name = agentsPanel.buffer.trim().toLowerCase();
-          if (!name) return;
-          if (!isValidAgentName(name)) {
-            setLog((l) => [
-              ...l,
-              { kind: "system", text: `invalid name '${name}' — use [a-z0-9_-]+` },
-            ]);
-            setAgentsPanel(null);
-            return;
-          }
-          if (loadAgent(process.cwd(), name)) {
-            setLog((l) => [
-              ...l,
-              { kind: "system", text: `'${name}' already exists` },
-            ]);
-            setAgentsPanel(null);
-            return;
-          }
-          setAgentsPanel(null);
-          triggerAgentBuilder(name);
-          return;
-        }
-        if (key.backspace || key.delete) {
-          setAgentsPanel({ mode: "create", buffer: agentsPanel.buffer.slice(0, -1) });
-          return;
-        }
-        if (_input && !key.ctrl && !key.meta && _input.length >= 1) {
-          setAgentsPanel({ mode: "create", buffer: agentsPanel.buffer + _input });
-          return;
-        }
+      if (key.pageUp) {
+        setPicker({ ...picker, selected: Math.max(0, picker.selected - visibleRows) });
         return;
+      }
+      if (key.pageDown) {
+        setPicker({
+          ...picker,
+          selected: Math.min(Math.max(0, picker.items.length - 1), picker.selected + visibleRows),
+        });
+        return;
+      }
+      if (key.return) {
+        const item = picker.items[picker.selected];
+        if (item && !item.disabled) picker.onSelect(item, picker.selected);
+        return;
+      }
+      return;
+    }
+    if (agentsCreate) {
+      if (key.escape) {
+        setAgentsCreate(null);
+        return;
+      }
+      if (key.return) {
+        const name = agentsCreate.buffer.trim().toLowerCase();
+        if (!name) return;
+        if (!isValidAgentName(name)) {
+          setLog((l) => [
+            ...l,
+            { kind: "system", text: `invalid name '${name}' — use [a-z0-9_-]+` },
+          ]);
+          setAgentsCreate(null);
+          return;
+        }
+        if (loadAgent(process.cwd(), name)) {
+          setLog((l) => [...l, { kind: "system", text: `'${name}' already exists` }]);
+          setAgentsCreate(null);
+          return;
+        }
+        setAgentsCreate(null);
+        triggerAgentBuilder(name);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setAgentsCreate({ buffer: agentsCreate.buffer.slice(0, -1) });
+        return;
+      }
+      if (_input && !key.ctrl && !key.meta && _input.length >= 1) {
+        setAgentsCreate({ buffer: agentsCreate.buffer + _input });
+        return;
+      }
+      return;
+    }
+    if (key.tab && input.startsWith("/")) {
+      const q = input.slice(1).toLowerCase();
+      const all = [
+        ...BUILTIN_COMMANDS.map((c) => c.name),
+        ...skills.map((s) => "/" + s.name),
+        ...customCommands.map((c) => "/" + c.name),
+      ];
+      const matches = all.filter((n) => n.slice(1).toLowerCase().startsWith(q));
+      if (matches.length === 0) return;
+      let lcp = matches[0]!;
+      for (const m of matches.slice(1)) {
+        let i = 0;
+        while (i < lcp.length && i < m.length && lcp[i]!.toLowerCase() === m[i]!.toLowerCase()) i++;
+        lcp = lcp.slice(0, i);
+      }
+      if (lcp.length > input.length) {
+        setInput(matches.length === 1 ? matches[0]! + " " : lcp);
+      } else if (matches.length === 1) {
+        setInput(matches[0]! + " ");
       }
       return;
     }
@@ -1285,7 +1489,7 @@ function App({
       lines.push(existsSync(cfgPath) ? `config: ${cfgPath}` : `config: (none at ${cfgPath})`);
       lines.push(
         mcp.serverInfo.length === 0
-          ? "mcp: (no .rawdog/mcp.json)"
+          ? `mcp: (no ${mcpConfigPath(process.cwd())})`
           : "mcp: " +
             mcp.serverInfo
               .map((srv) => (srv.error ? `${srv.name}✗ ${srv.error}` : `${srv.name}(${srv.tools})`))
@@ -1309,55 +1513,18 @@ function App({
     }
     if (text === "/sessions") {
       setInput("");
-      try {
-        const { listSessions } = await import("./sessions.ts");
-        const rows = listSessions(process.cwd(), 10);
-        if (rows.length === 0) {
-          setLog((l) => [
-            ...l,
-            { kind: "system", text: "no sessions yet in .rawdog/sessions/" },
-          ]);
-          return;
-        }
-        const current = sessionRef.current?.id;
-        const body = rows
-          .map((r) => {
-            const marker = r.id === current ? " (current)" : "";
-            return `  ${r.id}${marker}  ${r.messages} msgs\n    ${r.preview}`;
-          })
-          .join("\n");
-        setLog((l) => [
-          ...l,
-          {
-            kind: "system",
-            text: `recent sessions (ask rawdog to run \`sessions read <id>\` to pull one in):\n${body}`,
-          },
-        ]);
-      } catch (e: any) {
-        setLog((l) => [
-          ...l,
-          { kind: "system", text: `sessions error: ${e.message}` },
-        ]);
-      }
+      openSessionsPicker("Sessions");
       return;
     }
-    if (text === "/cost") {
+    if (text === "/usage") {
       setInput("");
-      const price = pricePerMTok(provider.name, provider.model);
       const { input: ti, output: to, cacheRead, turns } = cumUsage;
       const lines = [
+        `model: ${provider.name}:${provider.model}`,
         `turns: ${turns}`,
         `input tokens:  ${ti.toLocaleString()}${cacheRead ? ` (${cacheRead.toLocaleString()} cached)` : ""}`,
         `output tokens: ${to.toLocaleString()}`,
       ];
-      if (price) {
-        const cost = (ti * price.input + to * price.output) / 1_000_000;
-        lines.push(
-          `est. cost: $${cost < 0.01 ? cost.toFixed(5) : cost.toFixed(4)} (at ${provider.model} rates)`,
-        );
-      } else {
-        lines.push(`est. cost: unknown (no price entry for ${provider.model})`);
-      }
       setLog((l) => [...l, { kind: "system", text: lines.join("\n") }]);
       return;
     }
@@ -1545,22 +1712,7 @@ Cover when relevant: one-line project description, key directories, build/test/r
       setInput("");
       const arg = text === "/resume" ? "" : text.slice("/resume ".length).trim();
       if (!arg) {
-        const rows = listSessions(process.cwd(), 10);
-        if (rows.length === 0) {
-          setLog((l) => [...l, { kind: "system", text: "no sessions to resume" }]);
-          return;
-        }
-        const body = rows
-          .map((r) => `  ${r.id}  ${r.messages} msgs\n    ${r.preview}`)
-          .join("\n");
-        setLog((l) => [
-          ...l,
-          {
-            kind: "system",
-            text:
-              `recent sessions — use /resume <id> to hydrate messages into this session:\n${body}`,
-          },
-        ]);
+        openSessionsPicker("Resume session");
         return;
       }
       const msgs = loadSessionMessages(process.cwd(), arg);
@@ -1597,6 +1749,10 @@ Cover when relevant: one-line project description, key directories, build/test/r
     if (text === "/docs" || text.startsWith("/docs ")) {
       setInput("");
       const rest = text === "/docs" ? "" : text.slice("/docs ".length).trim();
+      if (!rest) {
+        await openDocsPicker();
+        return;
+      }
       try {
         const { toolMap } = await import("./tools.ts");
         const handler = toolMap["docs"];
@@ -1604,12 +1760,98 @@ Cover when relevant: one-line project description, key directories, build/test/r
           setLog((l) => [...l, { kind: "system", text: "docs tool not available" }]);
           return;
         }
-        const out = rest
-          ? await handler({ action: "read", name: rest })
-          : await handler({ action: "list" });
-        setLog((l) => [...l, { kind: "system", text: out }]);
+        const out = await handler({ action: "read", name: rest });
+        setLog((l) => [...l, { kind: "system", text: `# ${rest}\n\n${out}` }]);
       } catch (e: any) {
         setLog((l) => [...l, { kind: "system", text: `docs error: ${e.message}` }]);
+      }
+      return;
+    }
+
+    if (text === "/mcp" || text.startsWith("/mcp ")) {
+      setInput("");
+      const rest = text === "/mcp" ? "" : text.slice("/mcp ".length).trim();
+      const [sub, ...argParts] = rest.split(/\s+/).filter(Boolean);
+      const argName = argParts.join(" ").trim();
+      const cfgPath = mcpConfigPath(process.cwd());
+      try {
+        if (!sub) {
+          if (mcp.serverInfo.length === 0) {
+            setLog((l) => [
+              ...l,
+              {
+                kind: "system",
+                text:
+                  `no MCP servers configured\n` +
+                  `add one in ${cfgPath}, then /restart`,
+              },
+            ]);
+            return;
+          }
+          setLog((l) => [
+            ...l,
+            {
+              kind: "table",
+              heading: `mcp servers (${cfgPath}):`,
+              rows: mcp.serverInfo.map((srv) => ({
+                name: srv.name,
+                desc: srv.error
+                  ? `failed: ${srv.error}`
+                  : `${srv.tools} tool${srv.tools === 1 ? "" : "s"}`,
+                nameColor: srv.error ? "red" : undefined,
+              })),
+              footer:
+                "/mcp show <name> — list a server's tools\n" +
+                "edit the config + /restart to add or remove servers",
+            },
+          ]);
+          return;
+        }
+        if (sub === "show") {
+          if (!argName) {
+            setLog((l) => [...l, { kind: "system", text: "usage: /mcp show <name>" }]);
+            return;
+          }
+          const srv = mcp.serverInfo.find((s) => s.name === argName);
+          if (!srv) {
+            setLog((l) => [...l, { kind: "system", text: `no mcp server '${argName}'` }]);
+            return;
+          }
+          if (srv.error) {
+            setLog((l) => [
+              ...l,
+              { kind: "system", text: `${argName}: failed to init — ${srv.error}` },
+            ]);
+            return;
+          }
+          const prefix = `mcp__${argName}__`;
+          const serverTools = mcp.tools.filter((t) => t.def.name.startsWith(prefix));
+          if (serverTools.length === 0) {
+            setLog((l) => [
+              ...l,
+              { kind: "system", text: `${argName}: no tools exposed` },
+            ]);
+            return;
+          }
+          setLog((l) => [
+            ...l,
+            {
+              kind: "table",
+              heading: `${argName} tools:`,
+              rows: serverTools.map((t) => ({
+                name: t.def.name.slice(prefix.length),
+                desc: t.def.description || "(no description)",
+              })),
+            },
+          ]);
+          return;
+        }
+        setLog((l) => [
+          ...l,
+          { kind: "system", text: "usage: /mcp | /mcp show <name>" },
+        ]);
+      } catch (e: any) {
+        setLog((l) => [...l, { kind: "system", text: `mcp error: ${e.message}` }]);
       }
       return;
     }
@@ -1619,7 +1861,6 @@ Cover when relevant: one-line project description, key directories, build/test/r
       const rest = text === "/skills" ? "" : text.slice("/skills ".length).trim();
       const [sub, ...argParts] = rest.split(/\s+/).filter(Boolean);
       const argName = argParts.join(" ").trim().toLowerCase();
-      const dir = skillsDir(process.cwd(), "project");
       const reloadSkills = () => {
         const fresh = loadSkills(process.cwd());
         setSkills(fresh);
@@ -1627,33 +1868,7 @@ Cover when relevant: one-line project description, key directories, build/test/r
       };
       try {
         if (!sub) {
-          const current = reloadSkills();
-          if (current.length === 0) {
-            setLog((l) => [
-              ...l,
-              {
-                kind: "system",
-                text:
-                  `no skills in ${dir}\n` +
-                  `create one: /skills new <name>`,
-              },
-            ]);
-          } else {
-            setLog((l) => [
-              ...l,
-              {
-                kind: "table",
-                heading: `skills (project dir: ${dir}):`,
-                rows: current.map((s) => ({
-                  name: s.name,
-                  desc: `${s.description}  (${s.source}${s.invisible ? "" : ", visible"})`,
-                })),
-                footer:
-                  "invoke via /<name> [args]\n" +
-                  "build a new one: /skills new <name>",
-              },
-            ]);
-          }
+          openSkillsPicker();
           return;
         }
         if (sub === "show") {
@@ -1773,8 +1988,7 @@ Cover when relevant: one-line project description, key directories, build/test/r
       const argName = argParts.join(" ").trim();
       try {
         if (!sub) {
-          setAgentsList(loadAgents(process.cwd()));
-          setAgentsPanel({ mode: "list", selected: 0 });
+          openAgentsPicker();
           return;
         }
         if (sub === "show") {
@@ -2113,112 +2327,67 @@ Cover when relevant: one-line project description, key directories, build/test/r
             </Box>
           );
         })}
-        <Box
-          borderStyle="single"
-          borderColor="gray"
-          borderTop={true}
-          borderBottom={true}
-          borderLeft={false}
-          borderRight={false}
-        >
-          <Box width={2}>
-            <Text bold color="gray">
-              {"›"}
-            </Text>
-          </Box>
-          <TextInput
-            value={input}
-            onChange={setInput}
-            onSubmit={submit}
-            onHistoryPrev={pullQueueIntoInput}
-            focus={!agentsPanel}
-            placeholder={
-              queued.length > 0 ? "Press up to edit queued messages" : undefined
-            }
+        {picker ? (
+          <Picker
+            title={picker.title}
+            subtitle={picker.subtitle}
+            items={picker.items}
+            selected={picker.selected}
+            emptyText={picker.emptyText}
+            hintFooter={picker.hintFooter}
+            columns={columns}
+            rows={process.stdout.rows ?? 24}
           />
-        </Box>
-        {agentsPanel ? (
-          <Box flexDirection="column" paddingX={1}>
+        ) : agentsCreate ? (
+          <Box
+            flexDirection="column"
+            borderStyle="single"
+            borderColor="gray"
+            paddingX={1}
+          >
+            <Text bold color={PINK}>Create agent</Text>
+            <Text> </Text>
+            <Text color="gray">name ([a-z0-9_-]+):</Text>
             <Box>
-              <Text bold color={PINK}>Agents</Text>
-              <Text color="gray">  ({agentsDir(process.cwd())})</Text>
+              <Box width={2}>
+                <Text color={PINK}>›</Text>
+              </Box>
+              <Text>{agentsCreate.buffer}</Text>
+              <Text inverse> </Text>
             </Box>
             <Text> </Text>
-            {agentsPanel.mode === "list" && (() => {
-              const items: { label: string; desc: string }[] = [
-                { label: "+ Create new agent", desc: "" },
-                ...agentsList.map((a) => ({ label: a.name, desc: a.description })),
-              ];
-              const nameWidth = Math.max(...items.map((i) => i.label.length)) + 2;
-              return (
-                <Box flexDirection="column">
-                  {items.map((it, i) => {
-                    const sel = i === agentsPanel.selected;
-                    return (
-                      <Box key={i}>
-                        <Box width={2}>
-                          <Text color={sel ? PINK : "gray"}>{sel ? "›" : " "}</Text>
-                        </Box>
-                        <Box width={nameWidth}>
-                          <Text color={sel ? PINK : undefined} bold={sel}>
-                            {it.label}
-                          </Text>
-                        </Box>
-                        <Text color="gray">{it.desc}</Text>
-                      </Box>
-                    );
-                  })}
-                </Box>
-              );
-            })()}
-            {agentsPanel.mode === "actions" && (
-              <Box flexDirection="column">
-                <Box>
-                  <Text color="gray">agent: </Text>
-                  <Text color={PINK}>{agentsPanel.agentName}</Text>
-                </Box>
-                <Text> </Text>
-                {(["show", "spawn", "remove", "back"] as const).map((act, i) => {
-                  const sel = i === agentsPanel.selected;
-                  const desc =
-                    act === "show" ? "print file contents" :
-                    act === "spawn" ? "fill input with spawn template" :
-                    act === "remove" ? "delete the .md file" :
-                    "return to list";
-                  return (
-                    <Box key={act}>
-                      <Box width={2}>
-                        <Text color={sel ? PINK : "gray"}>{sel ? "›" : " "}</Text>
-                      </Box>
-                      <Box width={10}>
-                        <Text color={sel ? PINK : undefined} bold={sel}>{act}</Text>
-                      </Box>
-                      <Text color="gray">{desc}</Text>
-                    </Box>
-                  );
-                })}
-              </Box>
-            )}
-            {agentsPanel.mode === "create" && (
-              <Box flexDirection="column">
-                <Text color="gray">name the new agent ([a-z0-9_-]+):</Text>
-                <Box>
-                  <Box width={2}>
-                    <Text color={PINK}>›</Text>
-                  </Box>
-                  <Text>{agentsPanel.buffer}</Text>
-                  <Text inverse> </Text>
-                </Box>
-              </Box>
-            )}
-            <Text> </Text>
             <Text color="gray" dimColor>
-              {agentsPanel.mode === "create"
-                ? "type name · Enter confirm · Esc cancel"
-                : "↑↓ navigate · Enter select · Esc close"}
+              type name · Enter confirm · Esc cancel
             </Text>
           </Box>
-        ) : slashMatches ? (() => {
+        ) : (
+          <Box
+            borderStyle="single"
+            borderColor="gray"
+            borderTop={true}
+            borderBottom={true}
+            borderLeft={false}
+            borderRight={false}
+          >
+            <Box width={2}>
+              <Text bold color="gray">
+                {"›"}
+              </Text>
+            </Box>
+            <TextInput
+              value={input}
+              onChange={setInput}
+              onSubmit={submit}
+              onHistoryPrev={pullQueueIntoInput}
+              tabText={input.startsWith("/") ? false : undefined}
+              focus={!picker && !agentsCreate}
+              placeholder={
+                queued.length > 0 ? "Press up to edit queued messages" : undefined
+              }
+            />
+          </Box>
+        )}
+        {picker || agentsCreate ? null : slashMatches ? (() => {
           const nameWidth = Math.max(...slashMatches.map((m) => m.name.length)) + 2;
           return (
             <Box flexDirection="column" paddingLeft={2}>

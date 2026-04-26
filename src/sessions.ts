@@ -85,6 +85,7 @@ export type SessionSummary = {
   model: string;
   messages: number;
   preview: string;
+  title: string;
   bytes: number;
 };
 
@@ -115,6 +116,18 @@ function firstUserPreview(lines: any[]): string {
   return "(no user text)";
 }
 
+function deriveTitle(lines: any[]): string {
+  for (const l of lines) {
+    if (l.kind === "title" && typeof l.title === "string") {
+      return l.title.replace(/\s+/g, " ").trim().slice(0, 60);
+    }
+  }
+  const preview = firstUserPreview(lines);
+  if (preview === "(no user text)") return preview;
+  const cleaned = preview.replace(/\s+/g, " ").trim();
+  return cleaned.length > 60 ? cleaned.slice(0, 57) + "..." : cleaned;
+}
+
 export function listSessions(cwd: string, limit = 20): SessionSummary[] {
   const dir = sessionsDir(cwd);
   if (!existsSync(dir)) return [];
@@ -137,9 +150,20 @@ export function listSessions(cwd: string, limit = 20): SessionSummary[] {
       model: meta.model ?? "?",
       messages: msgs.length,
       preview: firstUserPreview(lines),
+      title: deriveTitle(lines),
       bytes,
     };
   });
+}
+
+export function writeSessionTitle(handle: SessionHandle, title: string): void {
+  const cleaned = title.replace(/\s+/g, " ").trim().slice(0, 80);
+  if (!cleaned) return;
+  appendFileSync(
+    handle.path,
+    JSON.stringify({ kind: "title", ts: new Date().toISOString(), title: cleaned }) + "\n",
+    "utf8",
+  );
 }
 
 export function readSession(cwd: string, id: string, maxChars = 40_000): string {

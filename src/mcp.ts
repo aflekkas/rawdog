@@ -230,9 +230,12 @@ class McpClient {
   }
 }
 
+export function mcpConfigPath(cwd: string): string {
+  return join(findProjectRoot(cwd), ".rawdog", "mcp.json");
+}
+
 function loadConfig(cwd: string): McpConfig | null {
-  const root = findProjectRoot(cwd);
-  const path = join(root, ".rawdog", "mcp.json");
+  const path = mcpConfigPath(cwd);
   if (!existsSync(path)) return null;
   try {
     return JSON.parse(readFileSync(path, "utf8")) as McpConfig;

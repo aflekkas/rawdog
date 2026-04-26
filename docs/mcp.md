@@ -25,6 +25,12 @@ Per-server `env` is also accepted and merges into the child's environment.
 - 2s graceful shutdown before SIGKILL
 - 20 KB cap on returned content (per call)
 
+## Inspecting servers
+
+`/mcp` lists configured servers with their tool count or init error. `/mcp show <name>` lists the tools that server exposed (descriptions included). `/context` also surfaces a one-line per-server summary.
+
+To add or remove a server, edit `.rawdog/mcp.json` and `/restart` — servers are spawned at startup, so the running session won't pick up config changes on its own.
+
 ## Failure handling
 
 If one server fails to start or errors during init, rawdog logs it and keeps going with the remaining servers. `/context` shows per-server status (`name(N tools)` or `name✗ error`). A broken MCP server never kills the agent.

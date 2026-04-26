@@ -8,11 +8,21 @@ Rendered with Ink. Streams provider output line-by-line. Tool calls render as di
 |---|---|
 | `enter` | Submit |
 | `shift+enter` / `opt+enter` / `\` + `enter` | Insert newline |
+| `tab` (composer starts with `/`) | Complete the slash command to the longest common prefix; appends a space when only one command matches |
 | `up` on first line | Pull queued messages into editor (appended to current input). On non-first lines moves cursor up. |
-| `esc` | Abort the current turn mid-stream, or clear queued messages if none running |
+| `esc` | Abort the current turn mid-stream, or clear queued messages if none running. Closes any open picker first. |
 | `ctrl+c` | Force quit |
 | `ctrl+v` | Paste image from clipboard |
 | Drag-drop image into terminal | Auto-attach the file |
+
+In a picker (e.g. `/sessions`, `/agents`, `/skills`, `/docs`):
+
+| Key | Effect |
+|---|---|
+| `up` / `down` | Move selection one row |
+| `pgup` / `pgdn` | Move selection one page |
+| `enter` | Trigger the per-command action on the selected item |
+| `esc` | Close the picker |
 
 ## Input features
 

@@ -7,17 +7,19 @@ Built-in commands are handled in the TUI directly (they don't hit the model). Cu
 | Command | Description |
 |---|---|
 | `/help` | List commands, including any custom ones |
-| `/cost` | Token usage + estimated USD spend (based on provider/model price table) |
+| `/usage` | Token totals for this session |
 | `/context` | Show loaded AGENTS.md / `.rawdog/*` / config / MCP / custom commands |
-| `/sessions` | List recent session transcripts |
+| `/sessions` | Resume a recent session |
 | `/model <spec>` | Switch provider/model mid-session, preserves history |
 | `/login` | Show current key status + storage path; to rotate, run `rawdog login` in a shell |
-| `/resume [id]` | List sessions, or hydrate one into the current session |
+| `/resume [id]` | Resume a recent session; `/resume <id>` loads a specific one directly |
 | `/todo` | Show persistent todo list (`<project>/.rawdog/todo.json`) |
-| `/agents` | List / show / rm named subagents; `/agents new <name>` builds one |
+| `/agents` | Show / spawn / remove / create subagents |
+| `/skills` | Show / remove skills; `/skills new <name>` builds one |
+| `/mcp` | List MCP servers and status; `/mcp show <name>` lists that server's tools |
 | `/compact` | Ask for a history summary to free context |
 | `/init` | Create or update `AGENTS.md` at the repo root |
-| `/docs [name]` | List rawdog's bundled docs, or read one by name |
+| `/docs [name]` | Read rawdog's bundled docs; `/docs <name>` opens a specific one directly |
 | `/clear`, `/new` | Wipe the chat log (in-memory only) |
 | `/paste` | Paste image from clipboard |
 | `/attach <path>` | Attach an image file |
