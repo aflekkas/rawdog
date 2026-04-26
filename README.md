@@ -1,6 +1,6 @@
 # 🐕 rawdog
 
-> Hackable Claude Code in a single binary
+> The AI CLI that does whatever it wants
 
 ## Docs
 
